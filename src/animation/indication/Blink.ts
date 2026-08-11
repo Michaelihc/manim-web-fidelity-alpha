@@ -9,6 +9,12 @@ import * as THREE from 'three';
 import { Mobject } from '../../core/Mobject';
 import { Animation, AnimationOptions } from '../Animation';
 import { linear } from '../../rate-functions';
+import {
+  applyPaintOpacityFactor,
+  capturePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from '../transform/PaintOpacity';
 
 export interface BlinkOptions extends AnimationOptions {
   /** Number of blinks. Default: 2 */
@@ -29,11 +35,11 @@ export class Blink extends Animation {
   /** Time proportion spent at minimum opacity */
   readonly blinkDuration: number;
 
-  /** Original opacity of the mobject */
-  private _originalOpacity: number = 1;
+  private _paint: PaintOpacitySnapshot = [];
 
   /** Materials that need opacity updates */
   private _materials: THREE.Material[] = [];
+  private _materialOpacities = new Map<THREE.Material, number>();
 
   constructor(mobject: Mobject, options: BlinkOptions = {}) {
     super(mobject, {
@@ -48,9 +54,10 @@ export class Blink extends Animation {
   override begin(): void {
     super.begin();
 
-    // Store original opacity and collect materials
-    this._originalOpacity = this.mobject.opacity;
+    // Store original paint and collect materials
+    this._paint = capturePaintOpacity(this.mobject);
     this._materials = [];
+    this._materialOpacities.clear();
 
     // Traverse to find all materials
     const threeObj = this.mobject.getThreeObject();
@@ -67,6 +74,7 @@ export class Blink extends Animation {
 
     // Enable transparency on all materials
     for (const material of this._materials) {
+      this._materialOpacities.set(material, material.opacity);
       material.transparent = true;
     }
   }
@@ -83,27 +91,26 @@ export class Blink extends Animation {
     const fadeOutEnd = (1 - this.blinkDuration) / 2;
     const fadeInStart = 1 - fadeOutEnd;
 
-    let currentOpacity: number;
+    let opacityFactor: number;
 
     if (blinkPhase < fadeOutEnd) {
       // Fading out
       const fadeProgress = blinkPhase / fadeOutEnd;
-      currentOpacity =
-        this._originalOpacity + (this.minOpacity - this._originalOpacity) * fadeProgress;
+      opacityFactor = 1 + (this.minOpacity - 1) * fadeProgress;
     } else if (blinkPhase < fadeInStart) {
       // At minimum opacity
-      currentOpacity = this.minOpacity;
+      opacityFactor = this.minOpacity;
     } else {
       // Fading in
       const fadeProgress = (blinkPhase - fadeInStart) / (1 - fadeInStart);
-      currentOpacity = this.minOpacity + (this._originalOpacity - this.minOpacity) * fadeProgress;
+      opacityFactor = this.minOpacity + (1 - this.minOpacity) * fadeProgress;
     }
 
     // Apply opacity to mobject and all materials
-    this.mobject.opacity = currentOpacity;
+    applyPaintOpacityFactor(this._paint, opacityFactor);
 
     for (const material of this._materials) {
-      material.opacity = currentOpacity;
+      material.opacity = (this._materialOpacities.get(material) ?? 1) * opacityFactor;
       material.needsUpdate = true;
     }
 
@@ -112,15 +119,24 @@ export class Blink extends Animation {
 
   override finish(): void {
     // Restore original opacity
-    this.mobject.opacity = this._originalOpacity;
+    restorePaintOpacity(this._paint);
 
     for (const material of this._materials) {
-      material.opacity = this._originalOpacity;
+      material.opacity = this._materialOpacities.get(material) ?? 1;
       material.needsUpdate = true;
     }
 
     this.mobject._markDirty();
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._paint);
+    for (const [material, opacity] of this._materialOpacities) {
+      material.opacity = opacity;
+      material.needsUpdate = true;
+    }
   }
 }
 

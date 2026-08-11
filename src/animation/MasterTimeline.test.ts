@@ -3,6 +3,8 @@ import * as THREE from 'three';
 import { Mobject } from '../core/Mobject';
 import { VMobject } from '../core/VMobject';
 import { Animation, AnimationOptions } from './Animation';
+import { AnimationGroup } from './AnimationGroup';
+import { Create } from './creation/Create';
 import { MasterTimeline } from './MasterTimeline';
 import { linear } from '../rate-functions';
 
@@ -500,6 +502,26 @@ describe('MasterTimeline', () => {
       expect(anim2.resetCallCount).toBeGreaterThanOrEqual(1);
     });
 
+    it('advances a monotonic seek without rebuilding completed history', () => {
+      const mob1 = new TestMobject();
+      const mob2 = new TestMobject();
+      const anim1 = new TestAnimation(mob1, { duration: 1 });
+      const anim2 = new TestAnimation(mob2, { duration: 1 });
+
+      tl.addSegment([anim1]);
+      tl.addSegment([anim2]);
+      tl.seek(0.5);
+      anim1.resetCallCount = 0;
+      anim2.resetCallCount = 0;
+
+      tl.seek(1.5);
+
+      expect(anim1.resetCallCount).toBe(0);
+      expect(anim2.resetCallCount).toBe(0);
+      expect(anim1.lastAlpha).toBe(1);
+      expect(anim2.lastAlpha).toBeCloseTo(0.5);
+    });
+
     it('clears _startedAnimations so updates re-begin animations', () => {
       const mob = new TestMobject();
       const anim = new TestAnimation(mob, { duration: 1 });
@@ -532,6 +554,171 @@ describe('MasterTimeline', () => {
       expect(mob2.opacity).toBe(0);
       // mob1 should still be visible
       expect(mob1.opacity).toBeGreaterThan(0);
+    });
+
+    it('starts a Create at alpha zero when a frame is microscopically before its segment', () => {
+      const first = new TestMobject();
+      const created = new TestMobject();
+      const create = new Create(created, { duration: 1, rateFunc: linear });
+
+      tl.addSegment([new TestAnimation(first, { duration: 1 })]);
+      tl.addSegment([create]);
+
+      const boundaryFrameTime = 1 - 1e-12;
+      tl.seek(boundaryFrameTime);
+
+      expect(create.startTime).toBe(1);
+      expect(created.opacity).toBe(0);
+      expect(created.getThreeObject().visible).toBe(true);
+      expect(create.isFinished()).toBe(false);
+
+      // Exercise the monotonic reveal path as well as the initial binary-search
+      // reconstruction path used above.
+      tl.seek(0);
+      expect(created.opacity).toBe(0);
+      tl.seek(boundaryFrameTime);
+      expect(create.startTime).toBe(1);
+      expect(created.opacity).toBe(0);
+      expect(created.getThreeObject().visible).toBe(true);
+    });
+
+    it('hides and exactly restores independent fill/stroke opacity for a future family', () => {
+      const first = new TestMobject();
+      const parent = new TestMobject();
+      const child = new TestMobject();
+      parent.add(child);
+      parent.setFillOpacity(0.75);
+      parent.setStrokeOpacity(0.2);
+      child.setFillOpacity(0.4);
+      child.setStrokeOpacity(0.9);
+
+      tl.addSegment([new TestAnimation(first, { duration: 1 })]);
+      tl.addSegment([new TestAnimation(parent, { duration: 1 })]);
+
+      tl.seek(0.5);
+      expect(parent.fillOpacity).toBe(0);
+      expect(parent.opacity).toBe(0);
+      expect(child.fillOpacity).toBe(0);
+      expect(child.opacity).toBe(0);
+
+      tl.seek(1);
+      expect(parent.fillOpacity).toBeCloseTo(0.75);
+      expect(parent.opacity).toBeCloseTo(0.2);
+      expect(child.fillOpacity).toBeCloseTo(0.4);
+      expect(child.opacity).toBeCloseTo(0.9);
+
+      tl.seek(0.5);
+      expect(parent.fillOpacity).toBe(0);
+      expect(child.fillOpacity).toBe(0);
+    });
+
+    it('tracks replacement targets at their transform segment instead of a later reuse', () => {
+      const source = new TestMobject();
+      const target = new TestMobject();
+      class TargetAnimation extends TestAnimation {
+        override getAllMobjects(): readonly Mobject[] {
+          return [this.mobject, target];
+        }
+      }
+
+      tl.addSegment([new TargetAnimation(source, { duration: 1 })]);
+      tl.addWaitSegment(1);
+      tl.addSegment([new TestAnimation(target, { duration: 1 })]);
+
+      tl.seek(0);
+      expect(target.opacity).toBeGreaterThan(0);
+      expect(target.getThreeObject().visible).toBe(true);
+
+      tl.seek(1.5);
+      expect(target.opacity).toBeGreaterThan(0);
+      expect(target.getThreeObject().visible).toBe(true);
+    });
+
+    it('establishes future visibility before direct play/update usage', () => {
+      const first = new TestMobject();
+      const future = new TestMobject();
+      tl.addSegment([new TestAnimation(first, { duration: 1 })]);
+      tl.addSegment([new TestAnimation(future, { duration: 1 })]);
+
+      tl.play();
+      tl.update(0.5);
+
+      expect(future.opacity).toBe(0);
+      expect(future.getThreeObject().visible).toBe(false);
+    });
+
+    it('keeps future mobjects suppressed if an updater rewrites their paint', () => {
+      const first = new TestMobject();
+      const future = new TestMobject();
+      tl.addSegment([new TestAnimation(first, { duration: 1 })]);
+      tl.addSegment([new TestAnimation(future, { duration: 1 })]);
+
+      tl.seek(0.5);
+      future.setOpacity(1);
+
+      expect(future.opacity).toBe(1);
+      expect(future.getThreeObject().visible).toBe(false);
+
+      tl.seek(1);
+      expect(future.getThreeObject().visible).toBe(true);
+    });
+
+    it('preserves completed visual state when a wait is appended after seeking', () => {
+      const mob = new TestMobject();
+      class MoveAnimation extends TestAnimation {
+        override interpolate(alpha: number): void {
+          super.interpolate(alpha);
+          this.mobject.position.x = 10 * alpha;
+        }
+      }
+      tl.addSegment([new MoveAnimation(mob, { duration: 1 })]);
+      tl.seek(1);
+      expect(mob.position.x).toBeCloseTo(10);
+
+      tl.addWaitSegment(1);
+      tl.seek(1.5);
+
+      expect(mob.position.x).toBeCloseTo(10);
+    });
+
+    it('discovers and hides mobjects nested in animation groups', () => {
+      const first = new TestMobject();
+      const nestedA = new TestMobject();
+      const nestedB = new TestMobject();
+      nestedA.setFillOpacity(1);
+      nestedB.setFillOpacity(0.6);
+      const nestedGroup = new AnimationGroup([
+        new TestAnimation(nestedA, { duration: 1 }),
+        new AnimationGroup([new TestAnimation(nestedB, { duration: 1 })]),
+      ]);
+
+      tl.addSegment([new TestAnimation(first, { duration: 1 })]);
+      tl.addSegment([nestedGroup]);
+      tl.seek(0.5);
+
+      expect(nestedA.fillOpacity).toBe(0);
+      expect(nestedA.opacity).toBe(0);
+      expect(nestedB.fillOpacity).toBe(0);
+      expect(nestedB.opacity).toBe(0);
+
+      tl.seek(1);
+      expect(nestedA.fillOpacity).toBe(1);
+      expect(nestedB.fillOpacity).toBeCloseTo(0.6);
+    });
+
+    it('keeps a child visible when its family was introduced in an earlier segment', () => {
+      const parent = new TestMobject();
+      const child = new TestMobject();
+      parent.add(child);
+      child.setFillOpacity(0.7);
+
+      tl.addSegment([new TestAnimation(parent, { duration: 1 })]);
+      tl.addWaitSegment(1);
+      tl.addSegment([new TestAnimation(child, { duration: 1 })]);
+
+      tl.seek(1.5);
+      expect(child.fillOpacity).toBeCloseTo(0.7);
+      expect(child.opacity).toBeGreaterThan(0);
     });
 
     it('does not hide mobjects whose segment has started', () => {

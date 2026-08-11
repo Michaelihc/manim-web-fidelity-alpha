@@ -90,7 +90,7 @@ interface MathJaxSingleton {
     content: string,
     options: Record<string, unknown>,
   ) => {
-    convert: (input: string, options: Record<string, unknown>) => unknown;
+    convertPromise: (input: string, options: Record<string, unknown>) => Promise<unknown>;
   };
   /** Internal registry the npm path uses to assert handler registration. */
   handlers?: { [Symbol.iterator]?: () => Iterator<unknown> };
@@ -101,6 +101,7 @@ interface MathJaxModuleNpm {
   mathjax: MathJaxSingleton;
   TeX: MathJaxConstructor;
   SVG: MathJaxConstructor;
+  MathJaxTexFont: MathJaxConstructor;
   adaptor: LiteAdaptor;
 }
 
@@ -187,6 +188,7 @@ async function loadMathJax(): Promise<MathJaxModuleState> {
         mathjax,
         TeX: bundle.TeX as unknown as MathJaxConstructor,
         SVG: bundle.SVG as unknown as MathJaxConstructor,
+        MathJaxTexFont: bundle.MathJaxTexFont as unknown as MathJaxConstructor,
         adaptor,
         strategy: 'npm' as const,
       };
@@ -346,16 +348,21 @@ export async function renderLatexToSVG(
     // ------------------------------------------------------------------
     // npm @mathjax/src
     // ------------------------------------------------------------------
-    const { mathjax: MathJax, TeX, SVG, adaptor } = mj;
+    const { mathjax: MathJax, TeX, SVG, MathJaxTexFont, adaptor } = mj;
 
     const tex = new TeX({
       packages: ['base', 'ams', 'newcommand', 'configmacros'],
       ...(Object.keys(macros).length > 0 ? { macros } : {}),
     });
-    const svg = new SVG({ fontCache: 'none' });
+    // The TeX font is monolithic, so browser builds do not need MathJax's
+    // package-relative runtime loader for dynamically split glyph ranges.
+    const svg = new SVG({ fontCache: 'none', fontData: MathJaxTexFont });
     const html = MathJax.document('', { InputJax: tex, OutputJax: svg });
 
-    const node = html.convert(texString, { display: displayMode });
+    // MathJax 4 loads font and package data asynchronously. The synchronous
+    // convert() API throws its internal "MathJax retry" signal while that data
+    // is loading; convertPromise() catches the signal and resumes conversion.
+    const node = await html.convertPromise(texString, { display: displayMode });
     svgString = adaptor.outerHTML(node as LiteElement);
 
     // Parse the string into a real SVGElement for downstream use
@@ -421,7 +428,10 @@ export async function renderLatexToSVG(
   const vmobjectGroup = svgToVMobjects(svgElement, {
     color,
     scale: 1,
-    flipY: false,
+    // MathJax's SVG root flips font-space Y with scale(1,-1). The SVG parser
+    // now honors that transform, so flip once more when mapping SVG Y-down
+    // coordinates into Manim's Y-up world space.
+    flipY: true,
     strokeWidth: 0.02,
     fillOpacity: 1,
   });

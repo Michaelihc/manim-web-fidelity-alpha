@@ -25,10 +25,10 @@ import {
 // ---------------------------------------------------------------------------
 describe('Create', () => {
   describe('constructor defaults', () => {
-    it('has duration=2', () => {
+    it('has Manim-compatible duration=1', () => {
       const m = new Mobject();
       const anim = new Create(m);
-      expect(anim.duration).toBe(2);
+      expect(anim.duration).toBe(1);
     });
 
     it('accepts custom duration', () => {

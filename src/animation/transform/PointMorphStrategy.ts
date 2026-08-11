@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { VMobject } from '../../core/VMobject';
 import { VGroup } from '../../core/VGroup';
-import { Mobject } from '../../core/Mobject';
+import { Mobject, type MobjectStyle } from '../../core/Mobject';
 import { Animation } from '../Animation';
 import { lerpPoint } from '../../utils/math';
-import { worldToParentLocalPosition } from '../../core/MobjectTraversal';
+import { collectLeafVMobjectSnapshots } from '../../core/MobjectTraversal';
 import {
   alignVmobjectPair,
   canMorphByPoints,
@@ -19,16 +19,14 @@ interface ChildStyle {
   strokeWidth: number;
   color: string;
   fillColor: string;
+  zIndex: number;
 }
 interface VGroupLeafState {
   child: VMobject;
   startPoints: number[][];
   targetPoints: number[][];
-  // Both positions are absolute coordinates in the source group's parent-local frame,
-  // computed via worldToParentLocal(*.worldPos, src.parentWorldMatrix).
-  // startPosition  = worldToParentLocal(src.worldPos,  src.parentWorldMatrix)
-  // targetPosition = worldToParentLocal(tgt.worldPos,  src.parentWorldMatrix)
-  //   (intentionally uses src.parentWorldMatrix so both are in the same frame)
+  // Detached normalized family snapshots bake ancestor transforms into leaf
+  // points, leaving both positions in the same identity-root frame.
   startPosition: THREE.Vector3;
   targetPosition: THREE.Vector3;
   finalTargetPoints: number[][];
@@ -40,13 +38,129 @@ interface VGroupLeafState {
 }
 const scratchColor = new THREE.Color();
 
+interface FamilyNodeState {
+  node: Mobject;
+  position: THREE.Vector3;
+  rotation: THREE.Euler;
+  scale: THREE.Vector3;
+  style: MobjectStyle;
+  zIndex: number;
+  points?: number[][];
+  transformSubpathLengths?: number[];
+}
+
+interface VMobjectTopologyInternals {
+  _transformSubpathLengths?: number[];
+}
+
+function captureCurrentStyle(node: Mobject): MobjectStyle {
+  return {
+    ...node.style,
+    fillColor: node.fillColor || node.color,
+    fillOpacity: node.fillOpacity,
+    strokeColor: node.strokeColor || node.color,
+    strokeOpacity: node.opacity,
+    strokeWidth: node.strokeWidth,
+  };
+}
+
+function applyOwnStyle(node: Mobject, style: MobjectStyle): void {
+  if (style.fillColor !== undefined) node.fillColor = style.fillColor;
+  if (style.strokeColor !== undefined) node.strokeColor = style.strokeColor;
+  if (style.fillOpacity !== undefined) {
+    Mobject.prototype.setFillOpacity.call(node, style.fillOpacity);
+  }
+  if (style.strokeOpacity !== undefined) {
+    Mobject.prototype.setStrokeOpacity.call(node, style.strokeOpacity);
+  }
+  if (style.strokeWidth !== undefined) {
+    Mobject.prototype.setStrokeWidth.call(node, style.strokeWidth);
+  }
+}
+
+function captureFamilyState(root: Mobject): FamilyNodeState[] {
+  const states: FamilyNodeState[] = [];
+  const visit = (node: Mobject) => {
+    const vmobject = node instanceof VMobject ? node : undefined;
+    const topology = vmobject as unknown as VMobjectTopologyInternals | undefined;
+    states.push({
+      node,
+      position: node.position.clone(),
+      rotation: node.rotation.clone(),
+      scale: node.scaleVector.clone(),
+      style: captureCurrentStyle(node),
+      zIndex: node.zIndex,
+      points: vmobject?.getLocalPoints().map((point) => [...point]),
+      transformSubpathLengths: topology?._transformSubpathLengths
+        ? [...topology._transformSubpathLengths]
+        : undefined,
+    });
+    for (const child of node.children) visit(child);
+  };
+  visit(root);
+  return states;
+}
+
+function restoreFamilyState(states: FamilyNodeState[]): void {
+  for (const state of states) {
+    const { node } = state;
+    node.position.copy(state.position);
+    node.rotation.copy(state.rotation);
+    node.scaleVector.copy(state.scale);
+    applyOwnStyle(node, state.style);
+    node.zIndex = state.zIndex;
+    node._markDirty();
+  }
+
+  // Family alignment can increase a leaf's point count. Restore geometry
+  // deepest-first so each VGroup once again has its captured child partition
+  // before its aggregate snapshot is passed through VGroup.setPoints().
+  for (let index = states.length - 1; index >= 0; index--) {
+    const state = states[index];
+    if (!(state.node instanceof VMobject) || !state.points) continue;
+    state.node.setPoints(state.points);
+    state.node.setTransformSubpathLengths(state.transformSubpathLengths);
+    state.node._markDirty();
+  }
+}
+
+/**
+ * Clone a VMobject family without invoking an async VGroup subclass constructor.
+ *
+ * MathTex is a VGroup whose copy() starts another MathJax render.  Transform
+ * alignment only needs a frozen structural snapshot, so rebuild containers as
+ * plain VGroups and leaves as plain VMobjects.  This also lets arbitrary parent
+ * stretches bake into a circle/arc's points without mutating or rejecting its
+ * class-authoritative parameters.
+ */
+function copyVmobjectFamily(root: VMobject): VMobject {
+  const clone = root instanceof VGroup ? new VGroup() : new VMobject();
+  clone.position.copy(root.position);
+  clone.rotation.copy(root.rotation);
+  clone.scaleVector.copy(root.scaleVector);
+  clone.setStyle(captureCurrentStyle(root));
+  clone.zIndex = root.zIndex;
+  clone.setBaseSubpathLengths(root.getEffectiveSubpathLengths());
+
+  if (!(root instanceof VGroup)) {
+    clone.setPoints(root.getLocalPoints());
+    return clone;
+  }
+
+  for (const child of root.children) {
+    clone.add(child instanceof VMobject ? copyVmobjectFamily(child) : child.copy());
+  }
+  return clone;
+}
+
 function captureStyle(m: VMobject): ChildStyle {
   return {
     opacity: m.opacity,
     fillOpacity: m.fillOpacity,
     strokeWidth: m.strokeWidth,
-    color: m.color,
+    color: m.strokeColor || m.color,
     fillColor: m.fillColor || m.color,
+    zIndex: m.zIndex,
   };
 }
 function captureStyleFaded(m: VMobject): ChildStyle {
@@ -54,8 +168,9 @@ function captureStyleFaded(m: VMobject): ChildStyle {
     opacity: 0,
     fillOpacity: 0,
     strokeWidth: m.strokeWidth,
-    color: m.color,
+    color: m.strokeColor || m.color,
     fillColor: m.fillColor || m.color,
+    zIndex: m.zIndex,
   };
 }
 
@@ -83,14 +198,19 @@ export class PointMorphStrategy implements MorphStrategy {
   private _targetRotation = new THREE.Euler();
   private _startScale = new THREE.Vector3(1, 1, 1);
   private _targetScale = new THREE.Vector3(1, 1, 1);
-  private _isVGroupTransform = false;
+  private _isFamilyTransform = false;
   private _vgroupLeafStates: VGroupLeafState[] = [];
+  private _sourceFamilyState: FamilyNodeState[] = [];
+  private _addedPlaceholders: VMobject[] = [];
+  private _targetGroupStyle: MobjectStyle | null = null;
+  private _targetGroupZIndex = 0;
 
   begin(_animation: Animation, source: Mobject, target: Mobject): void {
     if (!(source instanceof VMobject) || !(target instanceof VMobject))
       throw new Error('PointMorphStrategy requires VMobject inputs');
-    if (source instanceof VGroup && target instanceof VGroup) {
-      this._beginVGroup(source, target);
+    this._sourceFamilyState = captureFamilyState(source);
+    if (source instanceof VGroup || target instanceof VGroup) {
+      this._beginFamily(source, target);
       return;
     }
     const aligned = alignVmobjectPair(source, target);
@@ -105,9 +225,11 @@ export class PointMorphStrategy implements MorphStrategy {
     this._targetFillOpacity = target.fillOpacity;
     this._startStrokeWidth = source.strokeWidth;
     this._targetStrokeWidth = target.strokeWidth;
-    this._startColor.set(source.color);
-    this._targetColor.set(target.color);
-    this._interpolateColor = source.color !== target.color;
+    const sourceStrokeColor = source.strokeColor || source.color;
+    const targetStrokeColor = target.strokeColor || target.color;
+    this._startColor.set(sourceStrokeColor);
+    this._targetColor.set(targetStrokeColor);
+    this._interpolateColor = sourceStrokeColor !== targetStrokeColor;
     const sc = source.fillColor || source.color;
     const tc = target.fillColor || target.color;
     this._startFillColor.set(sc);
@@ -131,32 +253,50 @@ export class PointMorphStrategy implements MorphStrategy {
    *       target leaf (or a faded placeholder), with positions expressed in
    *       source's parent-local coordinate system.
    */
-  private _beginVGroup(source: VGroup, target: VGroup): void {
-    this._isVGroupTransform = true;
-    source.normalizeTransform();
-    const normalizedTarget = target.copy() as VGroup;
+  private _beginFamily(source: VMobject, target: VMobject): void {
+    this._isFamilyTransform = true;
+    const normalizedSource = copyVmobjectFamily(source);
+    const normalizedTarget = copyVmobjectFamily(target);
+    normalizedSource.normalizeTransform();
     normalizedTarget.normalizeTransform();
-    for (const pair of pairLeafSnapshotsByIndex(source, normalizedTarget))
-      this._vgroupLeafStates.push(this._build(source, pair));
+
+    const liveSourceLeaves = collectLeafVMobjectSnapshots(source).map((snapshot) => snapshot.leaf);
+
+    // The normalized copies hold all ancestor transforms in their leaf points.
+    // Put the live VMobject family into the same identity frame without calling
+    // normalizeTransform() on concrete leaves (which mutates class-authoritative
+    // fields such as Circle._radius and cannot be undone by Animation.reset()).
+    for (const state of this._sourceFamilyState) {
+      if (!(state.node instanceof VMobject)) continue;
+      state.node.position.set(0, 0, 0);
+      state.node.rotation.set(0, 0, 0);
+      state.node.scaleVector.set(1, 1, 1);
+      state.node._markDirty();
+    }
+
+    const pairs = pairLeafSnapshotsByIndex(normalizedSource, normalizedTarget);
+    for (let index = 0; index < pairs.length; index++) {
+      this._vgroupLeafStates.push(this._build(source, pairs[index], liveSourceLeaves[index]));
+    }
     // _startPosition / _targetPosition are the group's own position vectors (parent-local).
-    this._startPosition.copy(source.position);
+    this._startPosition.copy(normalizedSource.position);
     this._targetPosition.copy(normalizedTarget.position);
-    this._startRotation.copy(source.rotation);
+    this._startRotation.copy(normalizedSource.rotation);
     this._targetRotation.copy(normalizedTarget.rotation);
-    this._startScale.copy(source.scaleVector);
+    this._startScale.copy(normalizedSource.scaleVector);
     this._targetScale.copy(normalizedTarget.scaleVector);
+    this._targetGroupStyle = captureCurrentStyle(normalizedTarget);
+    this._targetGroupZIndex = normalizedTarget.zIndex;
   }
-  private _build(group: VGroup, pair: LeafPairByIndex): VGroupLeafState {
+  private _build(
+    group: VMobject,
+    pair: LeafPairByIndex,
+    liveSourceLeaf: VMobject | undefined,
+  ): VGroupLeafState {
     const { source: src, target: tgt, sourceIsPlaceholder, targetIsPlaceholder } = pair;
     const sc = src.leaf;
     const tc = tgt.leaf;
-    let child: VMobject = sc;
-    if (sourceIsPlaceholder) {
-      child = tc.copy() as VMobject;
-      child.opacity = 0;
-      child.fillOpacity = 0;
-      group.add(child);
-    }
+    const child = this._resolveLiveChild(group, tc, sourceIsPlaceholder, liveSourceLeaf);
     const canMorph = canMorphByPoints(sc, tc) && !sourceIsPlaceholder && !targetIsPlaceholder;
     const aligned = canMorph ? alignVmobjectPair(sc, tc) : undefined;
     const startPoints = aligned?.startPoints ?? child.getLocalPoints();
@@ -173,8 +313,8 @@ export class PointMorphStrategy implements MorphStrategy {
       child,
       startPoints,
       targetPoints,
-      startPosition: worldToParentLocalPosition(src.worldPosition, src.parentWorldMatrix),
-      targetPosition: worldToParentLocalPosition(tgt.worldPosition, src.parentWorldMatrix),
+      startPosition: src.worldPosition.clone(),
+      targetPosition: tgt.worldPosition.clone(),
       finalTargetPoints,
       finalTargetSubpathLengths,
       startStyle,
@@ -191,11 +331,32 @@ export class PointMorphStrategy implements MorphStrategy {
       },
     };
   }
+
+  private _resolveLiveChild(
+    group: VMobject,
+    targetLeaf: VMobject,
+    sourceIsPlaceholder: boolean,
+    liveSourceLeaf: VMobject | undefined,
+  ): VMobject {
+    if (!sourceIsPlaceholder) {
+      if (!liveSourceLeaf) {
+        throw new Error('PointMorphStrategy lost a live source leaf during family alignment');
+      }
+      return liveSourceLeaf;
+    }
+
+    const child = targetLeaf.copy() as VMobject;
+    child.opacity = 0;
+    child.fillOpacity = 0;
+    group.add(child);
+    this._addedPlaceholders.push(child);
+    return child;
+  }
+
   interpolate(_animation: Animation, source: Mobject, _target: Mobject, alpha: number): void {
-    if (this._isVGroupTransform) {
-      // group.position is NOT lerped: leaf positions already encode the group translation delta
-      // (targetPosition = P_target - P_source + target_child.localPos), so lerping them
-      // implicitly moves the group without needing to touch group.position mid-animation.
+    if (this._isFamilyTransform) {
+      // The detached normalized snapshots bake family translation into leaf
+      // geometry, so the live root remains in the identity frame throughout.
       for (const leaf of this._vgroupLeafStates) {
         const interpolated: number[][] = [];
         for (let i = 0; i < leaf.startPoints.length; i++)
@@ -208,7 +369,7 @@ export class PointMorphStrategy implements MorphStrategy {
         leaf.child.fillOpacity = ss.fillOpacity + (ts.fillOpacity - ss.fillOpacity) * alpha;
         leaf.child.strokeWidth = ss.strokeWidth + (ts.strokeWidth - ss.strokeWidth) * alpha;
         if (leaf.strokeColorPair.interpolate)
-          leaf.child.color =
+          leaf.child.strokeColor =
             '#' +
             scratchColor
               .lerpColors(leaf.strokeColorPair.start, leaf.strokeColorPair.target, alpha)
@@ -235,7 +396,7 @@ export class PointMorphStrategy implements MorphStrategy {
     vmobject.strokeWidth =
       this._startStrokeWidth + (this._targetStrokeWidth - this._startStrokeWidth) * alpha;
     if (this._interpolateColor)
-      vmobject.color =
+      vmobject.strokeColor =
         '#' +
         new THREE.Color().lerpColors(this._startColor, this._targetColor, alpha).getHexString();
     if (this._interpolateFillColor)
@@ -260,7 +421,7 @@ export class PointMorphStrategy implements MorphStrategy {
    *   @post source.{position, rotation, scaleVector} === target's captured-at-begin values
    *   @post source.getEffectiveSubpathLengths() matches target's topology
    *
-   * VGroup path:
+   * Family path (either root is a VGroup):
    *   @post source.position === normalizedTarget.position
    *         (normalizedTarget is target.copy() after normalizeTransform(), built during begin())
    *   @post for every leaf i: source.children[i].position === target.children[i]'s position
@@ -271,8 +432,8 @@ export class PointMorphStrategy implements MorphStrategy {
    *         === target.children[i]'s captured-at-begin style
    */
   finish(_animation: Animation, source: Mobject, target: Mobject): void {
-    if (this._isVGroupTransform) {
-      const group = source as VGroup;
+    if (this._isFamilyTransform) {
+      const group = source as VMobject;
       // leaf.targetPosition is in source-local space: P_target - P_source + target_child.localPos.
       // Re-express in target-local space by subtracting (P_target - P_source).
       const posOffset = new THREE.Vector3().subVectors(this._targetPosition, this._startPosition);
@@ -283,12 +444,19 @@ export class PointMorphStrategy implements MorphStrategy {
         leaf.child.opacity = ts.opacity;
         leaf.child.fillOpacity = ts.fillOpacity;
         leaf.child.strokeWidth = ts.strokeWidth;
-        leaf.child.color = ts.color;
+        leaf.child.strokeColor = ts.color;
         leaf.child.fillColor = ts.fillColor;
+        leaf.child.zIndex = ts.zIndex;
         leaf.child.setTransformSubpathLengths(leaf.finalTargetSubpathLengths);
         leaf.child._markDirty();
       }
       group.position.copy(this._targetPosition);
+      group.rotation.copy(this._targetRotation);
+      group.scaleVector.copy(this._targetScale);
+      if (source instanceof VGroup) {
+        if (this._targetGroupStyle) applyOwnStyle(group, this._targetGroupStyle);
+        group.zIndex = this._targetGroupZIndex;
+      }
       group._markDirty();
       return;
     }
@@ -301,11 +469,19 @@ export class PointMorphStrategy implements MorphStrategy {
     vmobject.opacity = this._targetOpacity;
     vmobject.fillOpacity = this._targetFillOpacity;
     vmobject.strokeWidth = this._targetStrokeWidth;
-    vmobject.color = vtarget.color;
-    if (this._interpolateFillColor) vmobject.fillColor = vtarget.fillColor || vtarget.color;
+    vmobject.strokeColor = vtarget.strokeColor || vtarget.color;
+    vmobject.fillColor = vtarget.fillColor || vtarget.color;
     vmobject.position.copy(this._targetPosition);
     vmobject.rotation.copy(this._targetRotation);
     vmobject.scaleVector.copy(this._targetScale);
+    vmobject.zIndex = vtarget.zIndex;
     vmobject._markDirty();
+  }
+
+  reset(_animation: Animation, _source: Mobject, _target: Mobject): void {
+    for (const placeholder of this._addedPlaceholders) {
+      if (placeholder.parent) placeholder.parent.remove(placeholder);
+    }
+    restoreFamilyState(this._sourceFamilyState);
   }
 }

@@ -18,42 +18,77 @@ export class RecordingScene {
   constructor(scene: Scene, masterTimeline: MasterTimeline) {
     this._realScene = scene;
     this._masterTimeline = masterTimeline;
+    this._realScene.setTimeline(this._masterTimeline);
   }
 
   /** Proxy for scene.play() — records animations into the master timeline. */
   async play(...animations: Animation[]): Promise<void> {
     if (animations.length === 0) return;
 
-    // Collect all nested animations for scene.add + begin()
+    // Collect all nested animations for scene.add().
     const allAnimations = this._collectAll(animations);
 
-    // Sync geometry so begin() can detect children
-    for (const anim of allAnimations) {
-      if (anim.mobject._dirty) {
-        anim.mobject._syncToThree();
-        anim.mobject._dirty = false;
+    // Await and sync every participating source/target before the timeline
+    // eventually calls begin() and freezes transform geometry. Transform
+    // targets are readiness inputs only: the scene-add loop below still adds
+    // live animation sources, not targets.
+    const readinessMobjects = new Set(
+      animations.flatMap((animation) =>
+        typeof animation.getAllMobjects === 'function'
+          ? [...animation.getAllMobjects()]
+          : [animation.mobject],
+      ),
+    );
+    const renderPromises: Promise<void>[] = [];
+    const collectRenders = (mobject: Animation['mobject']): void => {
+      const asyncMobject = mobject as Animation['mobject'] & {
+        waitForRender?: () => Promise<void>;
+      };
+      if (typeof asyncMobject.waitForRender === 'function') {
+        renderPromises.push(asyncMobject.waitForRender().catch(() => {}));
+      }
+      for (const child of mobject.children) collectRenders(child);
+    };
+    for (const mobject of readinessMobjects) collectRenders(mobject);
+    if (renderPromises.length > 0) {
+      await Promise.all(renderPromises);
+    }
+
+    for (const mobject of readinessMobjects) {
+      if (mobject._dirty) {
+        mobject._syncToThree();
+        mobject._dirty = false;
       }
     }
 
-    // Record segment BEFORE begin() so addSegment captures the correct
-    // pre-animation opacity. begin() may modify mobject opacity (e.g.
-    // Create's opacity fallback sets it to 0), which would corrupt the
-    // saved value used for visibility restoration during seek/playback.
+    // Record the untouched construction state. Animation.begin() deliberately
+    // belongs to timeline playback, not recording: it may put the live source
+    // at alpha zero or parent a hidden transform target. Beginning a later
+    // animation while recording would then snapshot those temporary values
+    // (for example, FadeOut after FadeIn would capture zero opacity and vanish
+    // instantly). Player.sequence() is batched and seeks to zero after the
+    // builder completes, so deferring begin() cannot expose a pre-animation
+    // frame.
     this._masterTimeline.addSegment(animations);
-
-    // Initialize top-level animations
-    for (const anim of animations) {
-      anim.begin();
-    }
 
     // Add to real scene (so they're visible when we seek)
     for (const anim of allAnimations) {
+      if (anim instanceof AnimationGroup) continue;
       if (!this._realScene.mobjects.has(anim.mobject)) {
+        const family =
+          typeof anim.mobject.getFamily === 'function' ? anim.mobject.getFamily() : [anim.mobject];
+        const priorCreationFlags = new Map(
+          family.map((member) => [member, member.createdAtBeginning] as const),
+        );
         this._realScene.add(anim.mobject);
-        // Mark as animation-introduced so MasterTimeline hides it
-        // until its segment starts (scene.add sets createdAtBeginning=true
-        // which would bypass the hiding logic in MasterTimeline.update).
-        anim.mobject.createdAtBeginning = false;
+        // Scene.add marks the full family as pre-existing. Restore each
+        // member's prior flag independently so an explicitly pre-added child
+        // remains visible while newly introduced siblings stay timeline-gated.
+        for (const member of family) {
+          if (!priorCreationFlags.get(member)) {
+            member.createdAtBeginning = false;
+          }
+        }
       }
     }
   }
@@ -97,8 +132,8 @@ export class RecordingScene {
   }
 
   /** Pass-through: batch updates. */
-  batch(callback: () => void): void {
-    this._realScene.batch(callback);
+  batch<T>(callback: () => T): T {
+    return this._realScene.batch(callback);
   }
 
   private _collectAll(animations: Animation[]): Animation[] {

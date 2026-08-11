@@ -3,16 +3,16 @@ import type { Config } from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'manim-web',
-  tagline: 'Mathematical animations for the web',
+  title: 'manim-web fidelity alpha',
+  tagline: 'Experimental Manim-style animation fidelity for the web',
   favicon: 'img/favicon.ico',
 
   future: {
     v4: true,
   },
 
-  url: 'https://maloyan.github.io',
-  baseUrl: '/manim-web/',
+  url: 'https://michaelihc.github.io',
+  baseUrl: '/manim-web-fidelity-alpha/',
 
   onBrokenLinks: 'warn',
 
@@ -72,7 +72,7 @@ const config: Config = {
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'manim-web',
+      title: 'manim-web fidelity alpha',
       items: [
         {
           type: 'docSidebar',
@@ -81,7 +81,7 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          href: 'https://github.com/maloyan/manim-web',
+          href: 'https://github.com/Michaelihc/manim-web-fidelity-alpha',
           label: 'GitHub',
           position: 'right',
         },
@@ -108,7 +108,7 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/maloyan/manim-web',
+              href: 'https://github.com/Michaelihc/manim-web-fidelity-alpha',
             },
           ],
         },

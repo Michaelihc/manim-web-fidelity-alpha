@@ -20,6 +20,10 @@ export interface ArrowOptions {
   tipLength?: number;
   /** Width of the arrowhead base. Default: 0.1 */
   tipWidth?: number;
+  /** Inset both endpoints along the shaft direction. Default: 0 */
+  buff?: number;
+  /** Cap tip length as a fraction of the buffered arrow length. Default: 1 */
+  maxTipLengthToLengthRatio?: number;
 }
 
 /**
@@ -204,6 +208,31 @@ function perpendicularFromDirection(dirX: number, dirY: number, dirZ: number): V
   return [px / len, py / len, pz / len];
 }
 
+function bufferEndpoints(
+  start: Vector3Tuple,
+  end: Vector3Tuple,
+  buff: number,
+): { start: Vector3Tuple; end: Vector3Tuple } {
+  const length = segmentLength(start, end);
+  if (length <= Number.EPSILON || buff === 0) {
+    return { start: [...start], end: [...end] };
+  }
+  const inset = Math.min(buff, length / 2);
+  const direction = segmentDirection(start, end);
+  return {
+    start: [
+      start[0] + direction[0] * inset,
+      start[1] + direction[1] * inset,
+      start[2] + direction[2] * inset,
+    ],
+    end: [
+      end[0] - direction[0] * inset,
+      end[1] - direction[1] * inset,
+      end[2] - direction[2] * inset,
+    ],
+  };
+}
+
 /**
  * Arrow - A line with an arrowhead at the end
  *
@@ -258,14 +287,24 @@ export class Arrow extends VGroup {
       strokeWidth = DEFAULT_STROKE_WIDTH,
       tipLength = 0.3,
       tipWidth = 0.1,
+      buff = 0,
+      maxTipLengthToLengthRatio = 1,
     } = options;
 
-    this._tipLength = tipLength;
+    if (!Number.isFinite(buff) || buff < 0) {
+      throw new RangeError('Arrow buff must be a finite non-negative number.');
+    }
+    if (!Number.isFinite(maxTipLengthToLengthRatio) || maxTipLengthToLengthRatio < 0) {
+      throw new RangeError('Arrow maxTipLengthToLengthRatio must be a finite non-negative number.');
+    }
+    const buffered = bufferEndpoints(start, end, buff);
+    const bufferedLength = segmentLength(buffered.start, buffered.end);
+    this._tipLength = Math.min(tipLength, bufferedLength * maxTipLengthToLengthRatio);
     this._tipWidth = tipWidth;
     this._color = color;
     this._strokeWidth = strokeWidth;
 
-    this.putStartAndEndOn(start, end);
+    this.putStartAndEndOn(buffered.start, buffered.end);
   }
 
   /**
@@ -623,14 +662,31 @@ export class DoubleArrow extends VGroup {
       strokeWidth = DEFAULT_STROKE_WIDTH,
       tipLength = 0.3,
       tipWidth = 0.1,
+      buff = 0,
+      maxTipLengthToLengthRatio = 1,
     } = options;
 
-    this._tipLength = tipLength;
+    if (!Number.isFinite(buff) || buff < 0) {
+      throw new RangeError('DoubleArrow buff must be a finite non-negative number.');
+    }
+    if (!Number.isFinite(maxTipLengthToLengthRatio) || maxTipLengthToLengthRatio < 0) {
+      throw new RangeError(
+        'DoubleArrow maxTipLengthToLengthRatio must be a finite non-negative number.',
+      );
+    }
+
+    const buffered = bufferEndpoints(start, end, buff);
+    const bufferedLength = segmentLength(buffered.start, buffered.end);
+    this._tipLength = Math.min(
+      tipLength,
+      bufferedLength * maxTipLengthToLengthRatio,
+      bufferedLength / 2,
+    );
     this._tipWidth = tipWidth;
     this._color = color;
     this._strokeWidth = strokeWidth;
 
-    this.putStartAndEndOn(start, end);
+    this.putStartAndEndOn(buffered.start, buffered.end);
   }
 
   private _generateParts(delta: Vector3Tuple): void {

@@ -2,8 +2,14 @@
 // happy-dom is needed for DOM manipulation (Player creates PlayerUI elements,
 // PlayerController attaches keyboard/mouse listeners to container elements).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as THREE from 'three';
 import { Player, PlayerOptions } from './Player';
 import { PlayerController, PlayerControllerCallbacks } from './PlayerController';
+import { Animation } from '../animation/Animation';
+import { Mobject } from '../core/Mobject';
+import { Circle } from '../mobjects/geometry/Circle';
+import { VGroup } from '../core/VGroup';
+import { linear } from '../rate-functions';
 
 // ---------------------------------------------------------------------------
 // Helper: create a container and Player (headless Scene, no WebGL needed)
@@ -26,8 +32,14 @@ function createMockAnimation(overrides: { dirty?: boolean; duration?: number } =
     _dirty: overrides.dirty ?? false,
     _syncToThree: vi.fn(),
     opacity: 1,
+    fillOpacity: 0,
+    children: [],
+    createdAtBeginning: false,
+    getFamily: vi.fn(),
+    getThreeObject: vi.fn(() => new THREE.Object3D()),
     dispose: vi.fn(),
   };
+  mockMobject.getFamily.mockReturnValue([mockMobject]);
   const mockAnimation = {
     mobject: mockMobject,
     duration: overrides.duration ?? 1,
@@ -36,6 +48,7 @@ function createMockAnimation(overrides: { dirty?: boolean; duration?: number } =
     update: vi.fn(),
     isFinished: vi.fn(() => false),
     startTime: null as number | null,
+    getAllMobjects: vi.fn(() => [mockMobject]),
   };
   return { mockMobject, mockAnimation };
 }
@@ -116,11 +129,157 @@ describe('Player', () => {
   });
 
   it('sequence calls render and seeks to 0 after recording', async () => {
-    const renderSpy = vi.spyOn(player.scene, 'render');
+    const renderSpy = vi.spyOn(player.scene as unknown as { _render: () => void }, '_render');
     await player.sequence(async () => {
       // No-op builder
     });
-    expect(renderSpy).toHaveBeenCalled();
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('sequence coalesces awaited recording work into one rendered frame', async () => {
+    class NoopAnimation extends Animation {
+      override interpolate(_alpha: number): void {}
+    }
+    const renderSpy = vi.spyOn(player.scene as unknown as { _render: () => void }, '_render');
+
+    await player.sequence(async (scene) => {
+      for (let index = 0; index < 3; index++) {
+        await scene.play(
+          new NoopAnimation(new Circle(), {
+            duration: 1,
+            rateFunc: linear,
+          }),
+        );
+        await Promise.resolve();
+      }
+    });
+
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('recording awaits lazy transform targets without adding them to the scene', async () => {
+    const source = new Circle();
+    const target = Object.assign(new Circle(), {
+      ready: false,
+      async waitForRender() {
+        await Promise.resolve();
+        this.ready = true;
+      },
+    });
+    class LazyTargetAnimation extends Animation {
+      targetReadyAtBegin = false;
+
+      override getAllMobjects() {
+        return [this.mobject, target];
+      }
+
+      override begin(): void {
+        this.targetReadyAtBegin = target.ready;
+        super.begin();
+      }
+
+      override interpolate(_alpha: number): void {}
+    }
+    const animation = new LazyTargetAnimation(source, { duration: 1, rateFunc: linear });
+
+    await player.sequence(async (scene) => {
+      await scene.play(animation);
+    });
+
+    expect(animation.targetReadyAtBegin).toBe(true);
+    expect(player.scene.mobjects.has(source)).toBe(true);
+    expect(player.scene.mobjects.has(target)).toBe(false);
+  });
+
+  it('preserves a pre-added child creation flag when its new parent is recorded', async () => {
+    const preAdded = new Circle();
+    player.scene.add(preAdded);
+    const introducedSibling = new Circle();
+    const group = new VGroup(preAdded, introducedSibling);
+    class NoopAnimation extends Animation {
+      override interpolate(_alpha: number): void {}
+    }
+
+    await player.sequence(async (scene) => {
+      await scene.play(new NoopAnimation(group, { duration: 1, rateFunc: linear }));
+    });
+
+    expect(preAdded.createdAtBeginning).toBe(true);
+    expect(group.createdAtBeginning).toBe(false);
+    expect(introducedSibling.createdAtBeginning).toBe(false);
+  });
+
+  it('advances monotonic export seeks without rebuilding scene membership', async () => {
+    class NoopAnimation extends Animation {
+      override interpolate(_alpha: number): void {}
+    }
+    const circle = new Circle();
+    await player.sequence(async (scene) => {
+      await scene.play(new NoopAnimation(circle, { duration: 1, rateFunc: linear }));
+    });
+    const batchSpy = vi.spyOn(player.scene, 'batch');
+    const removeSpy = vi.spyOn(player.scene, 'remove');
+
+    for (let frame = 1; frame <= 45; frame++) {
+      player.seek(frame / 60);
+    }
+
+    expect(batchSpy).not.toHaveBeenCalled();
+    expect(removeSpy).not.toHaveBeenCalled();
+
+    player.seek(0.25);
+
+    expect(batchSpy).toHaveBeenCalledTimes(1);
+    expect(removeSpy).toHaveBeenCalledWith(circle);
+  });
+
+  it('does not repaint unchanged future mobjects on every export frame', async () => {
+    class NoopAnimation extends Animation {
+      override interpolate(_alpha: number): void {}
+    }
+    const first = new Circle();
+    const future = new Circle();
+    await player.sequence(async (scene) => {
+      await scene.play(new NoopAnimation(first, { duration: 1, rateFunc: linear }));
+      await scene.play(new NoopAnimation(future, { duration: 1, rateFunc: linear }));
+    });
+
+    const fillSpy = vi.spyOn(Mobject.prototype, 'setFillOpacity');
+    const strokeSpy = vi.spyOn(Mobject.prototype, 'setStrokeOpacity');
+
+    for (let frame = 1; frame <= 45; frame++) {
+      player.seek(frame / 60);
+    }
+    expect(fillSpy).not.toHaveBeenCalled();
+    expect(strokeSpy).not.toHaveBeenCalled();
+
+    player.seek(1.1);
+    expect(fillSpy).toHaveBeenCalled();
+    expect(strokeSpy).toHaveBeenCalled();
+    const fillCallsAfterReveal = fillSpy.mock.calls.length;
+    const strokeCallsAfterReveal = strokeSpy.mock.calls.length;
+
+    for (let frame = 67; frame <= 90; frame++) {
+      player.seek(frame / 60);
+    }
+    expect(fillSpy).toHaveBeenCalledTimes(fillCallsAfterReveal);
+    expect(strokeSpy).toHaveBeenCalledTimes(strokeCallsAfterReveal);
+  });
+
+  it('removes recorded roots as one membership transaction', async () => {
+    class NoopAnimation extends Animation {
+      override interpolate(_alpha: number): void {}
+    }
+    const circles = [new Circle(), new Circle(), new Circle()];
+    const removeSpy = vi.spyOn(player.scene, 'remove');
+
+    await player.sequence(async (scene) => {
+      for (const circle of circles) {
+        await scene.play(new NoopAnimation(circle, { duration: 1, rateFunc: linear }));
+      }
+    });
+
+    expect(removeSpy).toHaveBeenCalledWith(...circles);
   });
 
   it('sequence with autoPlay starts playback', async () => {
@@ -204,6 +363,63 @@ describe('Player', () => {
     player.seek(1.0);
     expect(player.timeline.getCurrentTime()).toBeCloseTo(1.0);
     expect(renderSpy).toHaveBeenCalled();
+  });
+
+  it('renderExportFrame advances only active updaters once and renders once', async () => {
+    class NoopAnimation extends Animation {
+      override interpolate(_alpha: number): void {}
+    }
+
+    const activeTicks: Array<{ delta: number; time: number }> = [];
+    const futureTicks: Array<{ delta: number; time: number }> = [];
+    const active = new Circle().addUpdater((_mobject, delta) => {
+      activeTicks.push({ delta, time: player.timeline.getCurrentTime() });
+    });
+    const future = new Circle().addUpdater((_mobject, delta) => {
+      futureTicks.push({ delta, time: player.timeline.getCurrentTime() });
+    });
+    player.scene.add(active);
+    await player.sequence(async (scene) => {
+      await scene.wait(1);
+      await scene.play(new NoopAnimation(future, { duration: 1, rateFunc: linear }));
+    });
+
+    const renderSpy = vi.spyOn(player.scene as unknown as { _render: () => void }, '_render');
+    const frameDelta = 1 / 60;
+
+    player.renderExportFrame(0, 0);
+    expect(activeTicks).toEqual([]);
+    expect(futureTicks).toEqual([]);
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+
+    player.renderExportFrame(0.5, frameDelta);
+    expect(activeTicks).toEqual([{ delta: frameDelta, time: 0.5 }]);
+    expect(futureTicks).toEqual([]);
+    expect(renderSpy).toHaveBeenCalledTimes(2);
+
+    player.renderExportFrame(1, frameDelta);
+    expect(activeTicks).toEqual([
+      { delta: frameDelta, time: 0.5 },
+      { delta: frameDelta, time: 1 },
+    ]);
+    expect(futureTicks).toEqual([{ delta: frameDelta, time: 1 }]);
+    expect(renderSpy).toHaveBeenCalledTimes(3);
+
+    // Interactive seeking remains a pure timeline seek: it neither advances
+    // updaters nor routes through the export-frame API.
+    player.seek(1.5);
+    expect(activeTicks).toHaveLength(2);
+    expect(futureTicks).toHaveLength(1);
+  });
+
+  it('renderExportFrame validates its deterministic clock inputs', async () => {
+    await player.sequence(async (scene) => {
+      await scene.wait(1);
+    });
+
+    expect(() => player.renderExportFrame(Number.NaN, 1 / 60)).toThrow(TypeError);
+    expect(() => player.renderExportFrame(0, -1 / 60)).toThrow(TypeError);
+    expect(() => player.renderExportFrame(0, Number.POSITIVE_INFINITY)).toThrow(TypeError);
   });
 
   // ---- nextSegment / prevSegment ----
@@ -768,7 +984,13 @@ describe('Player _startLoop render loop', () => {
   });
 
   it('_startLoop updates mobject updaters', async () => {
-    const mockMob = { update: vi.fn(), dispose: vi.fn() };
+    const mockMob = {
+      update: vi.fn(),
+      dispose: vi.fn(),
+      children: [],
+      zIndex: 0,
+      getThreeObject: vi.fn(() => new THREE.Object3D()),
+    };
     (player.scene.mobjects as Set<unknown>).add(mockMob);
 
     await player.sequence(async (scene) => {
@@ -1289,7 +1511,11 @@ describe('RecordingScene pass-through methods', () => {
       await scene.play(mockAnimation as never);
     });
 
-    expect(mockAnimation.begin).toHaveBeenCalled();
+    // Recording must not call begin(): timeline playback owns animation
+    // initialization so later segments cannot snapshot an earlier alpha-zero
+    // construction state. This mock's update() is inert, so seek(0) does not
+    // delegate to begin() as a real Animation.update() would.
+    expect(mockAnimation.begin).not.toHaveBeenCalled();
     expect(addSpy).toHaveBeenCalledWith(mockMobject);
     expect(player.timeline.segmentCount).toBe(1);
     expect(player.timeline.getDuration()).toBeCloseTo(1.0);

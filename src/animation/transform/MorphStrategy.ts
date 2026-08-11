@@ -28,4 +28,12 @@ export interface MorphStrategy {
   begin(animation: Animation, source: Mobject, target: Mobject): void;
   interpolate(animation: Animation, source: Mobject, target: Mobject, alpha: number): void;
   finish(animation: Animation, source: Mobject, target: Mobject): void;
+  /**
+   * Restore any source/target state changed by begin/interpolate/finish.
+   *
+   * Transform strategies are allowed to align geometry and temporarily attach
+   * target render objects.  Timeline backward seeking therefore needs a
+   * strategy-level reset in addition to Animation's root-property snapshot.
+   */
+  reset?(animation: Animation, source: Mobject, target: Mobject): void;
 }

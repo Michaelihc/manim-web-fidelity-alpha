@@ -167,21 +167,21 @@ describe('Create - VMobject opacity fallback', () => {
 // DrawBorderThenFill - VMobject without Line2
 // =============================================================================
 
-describe('DrawBorderThenFill - VMobject without Line2', () => {
+describe('DrawBorderThenFill - point-bearing VMobject', () => {
   it('begin does not crash for VMobject without Line2', () => {
     const v = makeVMobject();
     const anim = new DrawBorderThenFill(v);
     expect(() => anim.begin()).not.toThrow();
   });
 
-  it('interpolate does nothing (no dash reveal)', () => {
+  it('uses the temporary outline style at the fill transition', () => {
     const v = makeVMobject();
     v.setStrokeOpacity(0.8);
     const anim = new DrawBorderThenFill(v);
     anim.begin();
     anim.interpolate(0.5);
-    // Without Line2, interpolate is a no-op
-    expect(v.opacity).toBe(0.8);
+    expect(v.opacity).toBe(1);
+    expect(v.fillOpacity).toBe(0);
   });
 
   it('finish does not crash', () => {
@@ -823,10 +823,10 @@ describe('Create - lagRatio stagger', () => {
 // =============================================================================
 
 describe('Create factory', () => {
-  it('default duration is 2', () => {
+  it('default duration is 1', () => {
     const m = new Mobject();
     const anim = create(m);
-    expect(anim.duration).toBe(2);
+    expect(anim.duration).toBe(1);
   });
 });
 

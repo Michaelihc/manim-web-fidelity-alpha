@@ -8,7 +8,15 @@ import { VMobject } from '../../core/VMobject';
 import { Mobject, Vector3Tuple } from '../../core/Mobject';
 import { Animation, AnimationOptions } from '../Animation';
 import { Transform } from './Transform';
-import { lerp, lerpPoint } from '../../utils/math';
+import { lerpPoint } from '../../utils/math';
+import {
+  applyPaintOpacitySnapshot,
+  capturePaintOpacity,
+  interpolatePaintColor,
+  interpolatePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from './PaintOpacity';
 
 // ============================================================================
 // ScaleInPlace
@@ -194,11 +202,7 @@ export class FadeToColor extends Animation {
   /** Target color */
   readonly targetColor: string;
 
-  /** Starting color as THREE.Color */
-  private _startColor: THREE.Color = new THREE.Color();
-
-  /** Target color as THREE.Color */
-  private _targetColorObj: THREE.Color = new THREE.Color();
+  private _startPaint: PaintOpacitySnapshot = [];
 
   constructor(mobject: Mobject, options: FadeToColorOptions) {
     super(mobject, options);
@@ -207,20 +211,23 @@ export class FadeToColor extends Animation {
 
   override begin(): void {
     super.begin();
-    this._startColor.set(this.mobject.color);
-    this._targetColorObj.set(this.targetColor);
+    this._startPaint = capturePaintOpacity(this.mobject);
   }
 
   interpolate(alpha: number): void {
-    const color = new THREE.Color().lerpColors(this._startColor, this._targetColorObj, alpha);
-    this.mobject.color = '#' + color.getHexString();
+    interpolatePaintColor(this._startPaint, this.targetColor, alpha);
     this.mobject._markDirty();
   }
 
   override finish(): void {
-    this.mobject.color = this.targetColor;
+    interpolatePaintColor(this._startPaint, this.targetColor, 1);
     this.mobject._markDirty();
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._startPaint);
   }
 }
 
@@ -289,9 +296,9 @@ export class TransformAnimations extends Animation {
   /** Original mobject state before any animation */
   private _originalPoints: number[][] = [];
 
-  /** Original style values */
-  private _originalOpacity: number = 1;
-  private _originalFillOpacity: number = 0;
+  private _originalPaint: PaintOpacitySnapshot = [];
+  private _anim2StartPaint: PaintOpacitySnapshot = [];
+  private _anim2EndPaint: PaintOpacitySnapshot = [];
 
   constructor(
     animation1: Animation,
@@ -314,13 +321,11 @@ export class TransformAnimations extends Animation {
 
     // Store original state
     this._originalPoints = vmobject.getLocalPoints();
-    this._originalOpacity = vmobject.opacity;
-    this._originalFillOpacity = vmobject.fillOpacity;
+    this._originalPaint = capturePaintOpacity(vmobject);
 
     // Initialize animation1 and capture its start and end states
     anim1Mobject.setPoints([...this._originalPoints]);
-    anim1Mobject.opacity = this._originalOpacity;
-    anim1Mobject.fillOpacity = this._originalFillOpacity;
+    restorePaintOpacity(this._originalPaint);
     this.animation1.begin();
 
     // Run animation1 to end and capture end state
@@ -328,24 +333,25 @@ export class TransformAnimations extends Animation {
 
     // Reset animation1 mobject
     anim1Mobject.setPoints([...this._originalPoints]);
-    anim1Mobject.opacity = this._originalOpacity;
-    anim1Mobject.fillOpacity = this._originalFillOpacity;
+    restorePaintOpacity(this._originalPaint);
 
     // Initialize animation2 and capture its states
     this._anim2StartPoints = anim2Mobject.getLocalPoints();
+    this._anim2StartPaint = capturePaintOpacity(anim2Mobject);
     this.animation2.begin();
 
     // Run animation2 to end
     this.animation2.interpolate(1);
     this._anim2EndPoints = anim2Mobject.getLocalPoints();
+    this._anim2EndPaint = capturePaintOpacity(anim2Mobject);
 
     // Reset animation2
     anim2Mobject.setPoints(this._anim2StartPoints);
+    restorePaintOpacity(this._anim2StartPaint);
 
     // Reset mobject to original
     vmobject.setPoints([...this._originalPoints]);
-    vmobject.opacity = this._originalOpacity;
-    vmobject.fillOpacity = this._originalFillOpacity;
+    restorePaintOpacity(this._originalPaint);
   }
 
   interpolate(alpha: number): void {
@@ -358,16 +364,17 @@ export class TransformAnimations extends Animation {
 
     // Run animation1 at current alpha
     anim1Mobject.setPoints([...this._originalPoints]);
-    anim1Mobject.opacity = this._originalOpacity;
+    restorePaintOpacity(this._originalPaint);
     this.animation1.interpolate(alpha);
     const anim1Points = anim1Mobject.getLocalPoints();
-    const anim1Opacity = anim1Mobject.opacity;
+    const anim1Paint = capturePaintOpacity(anim1Mobject);
 
     // Run animation2 at current alpha
     anim2Mobject.setPoints(this._anim2StartPoints);
+    restorePaintOpacity(this._anim2StartPaint);
     this.animation2.interpolate(alpha);
     const anim2Points = anim2Mobject.getLocalPoints();
-    const anim2Opacity = anim2Mobject.opacity;
+    const anim2Paint = capturePaintOpacity(anim2Mobject);
 
     // Blend between animation1 and animation2 results based on transformAlpha
     const blendedPoints: number[][] = [];
@@ -390,22 +397,34 @@ export class TransformAnimations extends Animation {
 
     vmobject.setPoints(blendedPoints);
 
-    // Blend opacity
-    vmobject.opacity = lerp(anim1Opacity, anim2Opacity, transformAlpha);
+    interpolatePaintOpacity(anim1Paint, anim2Paint, transformAlpha);
   }
 
   override finish(): void {
     // Finish with animation2's end state
     const vmobject = this.mobject as VMobject;
-    const anim2Mobject = this.animation2.mobject as VMobject;
-
-    vmobject.setPoints(this._anim2EndPoints);
-    vmobject.opacity = anim2Mobject.opacity;
 
     this.animation1.finish();
     this.animation2.finish();
 
+    vmobject.setPoints(this._anim2EndPoints);
+    applyPaintOpacitySnapshot(this._originalPaint, this._anim2EndPaint);
+
     super.finish();
+  }
+
+  override reset(): void {
+    this.animation1.reset();
+    if (this.animation2 !== this.animation1) this.animation2.reset();
+    super.reset();
+    restorePaintOpacity(this._originalPaint);
+  }
+
+  override getAllMobjects(): readonly Mobject[] {
+    const result = new Set<Mobject>([this.mobject]);
+    for (const mobject of this.animation1.getAllMobjects()) result.add(mobject);
+    for (const mobject of this.animation2.getAllMobjects()) result.add(mobject);
+    return [...result];
   }
 }
 

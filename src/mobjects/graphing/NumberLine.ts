@@ -14,6 +14,8 @@ export interface NumberLineOptions {
   color?: string;
   /** Stroke width in pixels. Default: 2 */
   strokeWidth?: number;
+  /** Stroke opacity. Default: 1 */
+  strokeOpacity?: number;
   /** Whether to include tick marks. Default: true */
   includeTicks?: boolean;
   /** Size of tick marks. Default: 0.2 */
@@ -73,6 +75,7 @@ export class NumberLine extends VMobject {
       length = 10,
       color = '#ffffff',
       strokeWidth = 2,
+      strokeOpacity = 1,
       includeTicks = true,
       tickSize = 0.2,
       includeNumbers = false,
@@ -99,6 +102,7 @@ export class NumberLine extends VMobject {
     this.color = color;
     this.fillOpacity = 0;
     this.strokeWidth = strokeWidth;
+    this.setStrokeOpacity(strokeOpacity);
 
     this._generatePoints();
   }
@@ -141,6 +145,7 @@ export class NumberLine extends VMobject {
         const tick = new VMobject();
         tick.color = this.color;
         tick.strokeWidth = this.strokeWidth;
+        tick.setStrokeOpacity(this.opacity);
         tick.fillOpacity = 0;
         tick.setPoints3D([
           [x, -ts, 0],
@@ -208,7 +213,7 @@ export class NumberLine extends VMobject {
    */
   numberToPoint(n: number): Vector3Tuple {
     const x = this._numberToX(n);
-    return [x + this.position.x, this.position.y, this.position.z];
+    return this._localToWorld([x, 0, 0]);
   }
 
   /**
@@ -219,7 +224,7 @@ export class NumberLine extends VMobject {
   pointToNumber(point: Vector3Tuple): number {
     const [min, max] = this._xRange;
     const range = max - min;
-    const localX = point[0] - this.position.x;
+    const localX = this._worldToLocal(point)[0];
     return (localX / this._length + 0.5) * range + min;
   }
 
@@ -342,6 +347,7 @@ export class NumberLine extends VMobject {
       length: this._length,
       color: this.color,
       strokeWidth: this.strokeWidth,
+      strokeOpacity: this.opacity,
       includeTicks: this._includeTicks,
       tickSize: this._tickSize,
       includeNumbers: this._includeNumbers,
@@ -366,6 +372,8 @@ export interface UnitIntervalOptions {
   color?: string;
   /** Stroke width in pixels. Default: 2 */
   strokeWidth?: number;
+  /** Stroke opacity. Default: 1 */
+  strokeOpacity?: number;
   /** Whether to include tick marks. Default: true */
   includeTicks?: boolean;
   /** Size of tick marks. Default: 0.2 */
@@ -403,6 +411,7 @@ export class UnitInterval extends NumberLine {
       length = 5,
       color = '#ffffff',
       strokeWidth = 2,
+      strokeOpacity = 1,
       includeTicks = true,
       tickSize = 0.2,
       includeNumbers = false,
@@ -420,6 +429,7 @@ export class UnitInterval extends NumberLine {
       length,
       color,
       strokeWidth,
+      strokeOpacity,
       includeTicks,
       tickSize,
       includeNumbers,
@@ -434,6 +444,7 @@ export class UnitInterval extends NumberLine {
       length: this.getLength(),
       color: this.color,
       strokeWidth: this.strokeWidth,
+      strokeOpacity: this.opacity,
       includeTicks: this.hasTicks(),
       tickSize: this.getTickSize(),
       numDecimalPlaces: xRange[2] === 0.1 ? 1 : xRange[2] === 0.25 ? 2 : 0,

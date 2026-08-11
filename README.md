@@ -1,156 +1,97 @@
 <div align="center">
 
-# manim-web
+# manim-web fidelity alpha
 
-**Mathematical animations for the web.**
-
-The power of [3Blue1Brown's Manim](https://github.com/3b1b/manim) — in the browser, no Python required.
-
-<img src="assets/demo_square_to_circle.gif" width="600" alt="Square to Circle demo">
-
-[![npm version](https://img.shields.io/npm/v/manim-web.svg)](https://www.npmjs.com/package/manim-web)
-[![CI](https://github.com/maloyan/manim-web/actions/workflows/ci.yml/badge.svg)](https://github.com/maloyan/manim-web/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/maloyan/manim-web/branch/main/graph/badge.svg)](https://codecov.io/gh/maloyan/manim-web)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-[Quick Start](#quick-start) · [Examples](https://maloyan.github.io/manim-web/) · [Docs](https://maloyan.github.io/manim-web/) · [npm](https://www.npmjs.com/package/manim-web)
+**Manim-style mathematical animation in TypeScript, rendered directly in the browser.**
 
 </div>
 
----
+> [!WARNING]
+> **Experimental alpha.** APIs, rendering behavior, and export output may change. This is a fidelity-focused fork of [`manim-web`](https://github.com/maloyan/manim-web), not a drop-in replacement for Python Manim and not yet intended for production-critical rendering. Inspect and validate exported media.
 
-## Quick Start
+<div align="center">
 
-### Browser
+<img src="assets/write-fidelity-comparison.gif" width="960" alt="The existing web port reveals complete text immediately while the fidelity alpha progressively traces and fills each glyph">
 
-```html
-<h1>Manim-web demo</h1>
-<div id="container"></div>
-<script type="module">
-    import {
-        Scene,
-        Circle,
-        Create,
-    } from "https://cdn.jsdelivr.net/npm/manim-web@latest/dist/manim-web.browser.js";
+<sub>The same deterministic <code>Write(MathTex)</code> scene on upstream 0.3.24 and this alpha. The upstream implementation exposes the completed glyphs immediately; this branch traces and fills their vector paths over time.</sub>
 
-    const options = { width: 500, height: 300 };
-    const scene = new Scene(
-        document.getElementById("container"),
-        options,
-    );
-    const circle = new Circle({ radius: 1.5 });
-    await scene.play(new Create(circle));
-</script>
-```
+</div>
 
+## What this is
 
+This repository is a browser-native TypeScript toolkit for building Manim-style mathematical animations as HTML scenes. It is especially useful for coding agents and web applications that need inspectable scene code, deterministic seeking, and GIF or MP4 output without a Python runtime.
 
-### Locally
+This alpha focuses on fidelity gaps that become obvious in real productions:
+
+- progressive path-based `Write` and `Create` animations;
+- fill-aware fades, transforms, indications, arrows, and graph drawing;
+- deterministic timeline recording, seeking, and frame export;
+- MathTex, geometry, graphing, 3D, React, and Vue building blocks; and
+- a 12,201-frame ESAP review scene used as a full-production regression case.
+
+It does not yet promise complete API or pixel parity with Python Manim.
+
+## Quick start
 
 ```bash
-npm install manim-web
-```
-
-```typescript
-import { Scene, Circle, Square, Create, Transform, FadeOut } from 'manim-web';
-
-async function squareToCircle(scene: Scene) {
-  const square = new Square({ sideLength: 3 });
-  const circle = new Circle({ radius: 1.5 });
-
-  await scene.play(new Create(square));
-  await scene.play(new Transform(square, circle));
-  await scene.play(new FadeOut(square));
-}
-```
-
-See the [examples](https://maloyan.github.io/manim-web/) for more.
-
-## What You Can Build
-
-<table>
-<tr>
-<td align="center"><img src="assets/demo_function_graph.gif" width="350" alt="Function Graphs"><br><b>Function Graphs</b></td>
-<td align="center"><img src="assets/demo_math_equations.gif" width="350" alt="LaTeX Equations"><br><b>LaTeX Equations</b></td>
-</tr>
-<tr>
-<td align="center"><img src="assets/demo_text.gif" width="350" alt="Text Animations"><br><b>Text Animations</b></td>
-<td align="center"><img src="assets/demo_square_to_circle.gif" width="350" alt="Geometry Transforms"><br><b>Geometry Transforms</b></td>
-</tr>
-</table>
-
-## Features
-
-- **Geometry** — Circle, Rectangle, Polygon, Arrow, Arc, Star, Brace, and more
-- **Text & LaTeX** — Text, MathTex, Tex, Paragraph via KaTeX
-- **Graphing** — Axes, NumberPlane, FunctionGraph, ParametricFunction, VectorField, BarChart
-- **3D** — Sphere, Cube, Cylinder, Torus, Surface3D, ThreeDAxes with orbit controls
-- **Animations** — FadeIn/Out, Create, Transform, Write, GrowFromCenter, AnimationGroup, LaggedStart
-- **Interaction** — Draggable, Hoverable, Clickable mobjects
-- **Export** — GIF and video export
-- **Graphs & Tables** — Network graphs, Matrix, Table
-
-## Framework Integrations
-
-### React
-
-```tsx
-import { ManimScene } from 'manim-web/react';
-
-function App() {
-  return <ManimScene construct={squareToCircle} width={800} height={450} />;
-}
-```
-
-### Vue
-
-```vue
-<script setup>
-import { ManimScene } from 'manim-web/vue';
-</script>
-
-<template>
-  <ManimScene :construct="squareToCircle" :width="800" :height="450" />
-</template>
-```
-
-## Python to TypeScript
-
-Have existing Manim scripts? Convert them:
-
-```bash
-node tools/py2ts.cjs input.py -o output.ts
-```
-
-## Logging
-
-manim-web logs through a small structured logger. Subscribe to log messages
-with `onLog` — useful for surfacing errors in your UI or forwarding them to a
-server (handy for AI agents that write and debug scenes):
-
-```ts
-import { onLog } from 'manim-web';
-
-const unsubscribe = onLog((entry) => {
-  // entry = { level, message, timestamp } — always JSON-serializable
-  fetch('/__log', { method: 'POST', body: JSON.stringify(entry) });
-});
-
-unsubscribe(); // stop receiving log messages
-```
-
-Forwarded messages are sanitized (tokens, keys, and emails are redacted) and
-respect the `LOG_LEVEL` environment variable (`debug` | `info` | `warn` | `error`).
-
-## Contributing
-
-```bash
-git clone https://github.com/maloyan/manim-web.git
-cd manim-web
+git clone https://github.com/Michaelihc/manim-web-fidelity-alpha.git
+cd manim-web-fidelity-alpha
 npm install
 npm run dev
 ```
 
+Then open one of the pages under `examples/`, such as:
+
+- `http://localhost:5173/examples/write_limit_demo.html`
+- `http://localhost:5173/examples/esap_review.html`
+
+The ESAP page runs visually without bundled audio. Supply audio you have the right to use with an `audio` query parameter, for example `?audio=/media/track.wav`.
+
+## Small example
+
+```typescript
+import { Circle, Create, FadeOut, Scene, Square, Transform } from './src/index.ts';
+
+const scene = new Scene(document.getElementById('stage')!, {
+  width: 800,
+  height: 450,
+});
+
+const square = new Square({ sideLength: 3 });
+const circle = new Circle({ radius: 1.5 });
+
+await scene.play(new Create(square));
+await scene.play(new Transform(square, circle));
+await scene.play(new FadeOut(square));
+```
+
+## Capabilities
+
+- **Geometry** — circles, rectangles, polygons, arrows, arcs, braces, and more
+- **Text and math** — vector text, MathTex, Tex, and paragraphs
+- **Graphing** — axes, number planes, functions, vector fields, and charts
+- **3D** — surfaces, solids, three-dimensional axes, and orbit controls
+- **Animation** — creation, fading, transforms, indications, groups, and staggered starts
+- **Interaction** — draggable, hoverable, and clickable mobjects
+- **Export** — GIF, browser video, and deterministic MP4 rendering workflows
+- **Frameworks** — React and Vue scene components
+
+## Validation
+
+```bash
+npm run typecheck
+npm test
+npm run test:integration
+```
+
+The included fidelity fixtures expose deterministic intermediate animation states so automated tests and agents can inspect partial geometry instead of judging only the final frame.
+
+## Project status and provenance
+
+This is an experimental derivative of [Narek Maloyan's `manim-web`](https://github.com/maloyan/manim-web). The original MIT license and copyright notice are preserved. The project is inspired by [3Blue1Brown's Manim](https://github.com/3b1b/manim) but is an independent TypeScript implementation.
+
+Generated renders, QA captures, reference videos, and third-party audio are intentionally excluded from the repository.
+
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -23,10 +23,14 @@ export interface FunctionGraphOptions {
   color?: string;
   /** Stroke width in pixels. Default: 2 */
   strokeWidth?: number;
+  /** Stroke opacity. Default: 1 */
+  strokeOpacity?: number;
   /** X values where the function is discontinuous. Default: [] */
   discontinuities?: number[];
   /** Number of samples to take. Default: 100 */
   numSamples?: number;
+  /** Smooth sampled points with a Catmull-Rom spline. Default: true */
+  useSmoothing?: boolean;
   /** Reference axes for coordinate transformation. Optional */
   axes?: AxesLike;
 }
@@ -65,6 +69,7 @@ export class FunctionGraph extends VMobject {
   private _xRange: [number, number];
   private _discontinuities: number[];
   private _numSamples: number;
+  private _useSmoothing: boolean;
   private _axes: AxesLike | null;
 
   constructor(options: FunctionGraphOptions) {
@@ -75,8 +80,10 @@ export class FunctionGraph extends VMobject {
       xRange,
       color = '#58c4dd',
       strokeWidth = 2,
+      strokeOpacity = 1,
       discontinuities = [],
       numSamples = 100,
+      useSmoothing = true,
       axes,
     } = options;
 
@@ -95,10 +102,12 @@ export class FunctionGraph extends VMobject {
 
     this._discontinuities = [...discontinuities].sort((a, b) => a - b);
     this._numSamples = numSamples;
+    this._useSmoothing = useSmoothing;
 
     this.color = color;
     this.fillOpacity = 0;
     this.strokeWidth = strokeWidth;
+    this.setStrokeOpacity(strokeOpacity);
 
     this._generatePoints();
   }
@@ -123,7 +132,7 @@ export class FunctionGraph extends VMobject {
     ranges.push([currentStart, xMax]);
 
     const allPoints: number[][] = [];
-    let isFirstSegment = true;
+    const subpathLengths: number[] = [];
 
     for (const [rangeStart, rangeEnd] of ranges) {
       const segmentPoints = this._sampleRange(rangeStart, rangeEnd);
@@ -131,22 +140,13 @@ export class FunctionGraph extends VMobject {
       if (segmentPoints.length >= 2) {
         const bezierPoints = this._pointsToBezier(segmentPoints);
 
-        if (!isFirstSegment && allPoints.length > 0) {
-          // Add a break between segments by moving to the new start
-          // We do this by adding a degenerate segment
-          const lastPoint = allPoints[allPoints.length - 1];
-          const firstPoint = bezierPoints[0];
-          allPoints.push([...lastPoint]);
-          allPoints.push([...lastPoint]);
-          allPoints.push([...firstPoint]);
-        }
-
         allPoints.push(...bezierPoints);
-        isFirstSegment = false;
+        subpathLengths.push(bezierPoints.length);
       }
     }
 
     this.setPoints3D(allPoints);
+    this.setBaseSubpathLengths(subpathLengths.length > 1 ? subpathLengths : undefined);
   }
 
   /**
@@ -194,6 +194,10 @@ export class FunctionGraph extends VMobject {
    */
   private _pointsToBezier(points: number[][]): number[][] {
     if (points.length < 2) return points;
+    if (!this._useSmoothing) {
+      const corners = new VMobject().setPointsAsCorners(points);
+      return corners.getLocalPoints();
+    }
     if (points.length === 2) {
       // Simple line
       const p0 = points[0];
@@ -359,6 +363,7 @@ export class FunctionGraph extends VMobject {
       strokeWidth: this.strokeWidth,
       discontinuities: this._discontinuities,
       numSamples: this._numSamples,
+      useSmoothing: this._useSmoothing,
       axes: this._axes ?? undefined,
     });
     this._copyBaseAttributesInto(copy, { copyChildren: false });

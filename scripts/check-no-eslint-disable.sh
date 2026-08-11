@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Keep this script LF-only; Windows CRLF breaks Bash's `pipefail` option.
 #
 # Fail if any `eslint-disable` / `eslint-enable` directive exists anywhere in
 # the repository.

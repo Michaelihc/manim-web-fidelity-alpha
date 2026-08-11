@@ -265,7 +265,7 @@ export class Axes extends Group {
     const visualX = (xNorm - 0.5) * this._xLength;
     const visualY = (yNorm - 0.5) * this._yLength;
 
-    return [visualX + this.position.x, visualY + this.position.y, this.position.z];
+    return this._localToWorld([visualX, visualY, 0]);
   }
 
   /**
@@ -277,9 +277,9 @@ export class Axes extends Group {
     const [xMin, xMax] = this._xRange;
     const [yMin, yMax] = this._yRange;
 
-    // Get local coordinates
-    const localX = point[0] - this.position.x;
-    const localY = point[1] - this.position.y;
+    const local = this._worldToLocal(point);
+    const localX = local[0];
+    const localY = local[1];
 
     // Convert from visual to normalized (0 to 1)
     const xNorm = localX / this._xLength + 0.5;

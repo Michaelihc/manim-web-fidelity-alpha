@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Write limitation demo</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #070a10; }
+      body { display: grid; place-items: center; }
+      #stage { width: 960px; height: 540px; overflow: hidden; background: #070a10; }
+      #stage canvas { display: block; width: 100%; height: 100%; }
+    </style>
+  </head>
+  <body>
+    <main id="stage" aria-label="Write animation comparison"></main>
+    <script type="module" src="./write_limit_demo.ts"></script>
+  </body>
+</html>

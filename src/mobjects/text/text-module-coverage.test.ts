@@ -11,6 +11,12 @@
 import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { DEFAULT_FONT_SIZE_PT, DEFAULT_FONT_SIZE_IN_WORLD_SPACE } from '../../constants/fontRender';
 
+// This legacy coverage file lazily imports each text backend so their
+// module-level browser side effects remain isolated. The bundled MathJax v4
+// graph can legitimately take longer than Vitest's 10-second hook default on
+// a cold Windows transform cache; give those import hooks a file-local bound.
+vi.setConfig({ hookTimeout: 60_000 });
+
 // ---------------------------------------------------------------------------
 // Canvas mock (happy-dom does not support canvas 2D context)
 // ---------------------------------------------------------------------------

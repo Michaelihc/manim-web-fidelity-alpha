@@ -14,7 +14,12 @@ import { Mobject, Vector3Tuple } from './Mobject';
 import { isVMobject } from './MobjectTypes';
 import { VMobjectRendering } from './VMobjectRendering';
 import { lerp, lerpPoint as lerpPoint3D, signedArea2DFromStride } from '../utils/math';
-import type { Point } from './VMobjectCurves';
+import {
+  partialBezierSubpaths,
+  pointAtBezierPathProportion,
+  smoothBezierPoints,
+  type Point,
+} from './VMobjectCurves';
 
 import { resamplePointList3D } from './VMobjectTransformAlignment';
 import { computePointBounds } from './PointBounds';
@@ -289,6 +294,26 @@ export class VMobject extends VMobjectRendering {
   }
 
   /**
+   * Set interpolation knots and connect them with a smooth cubic Bézier chain.
+   */
+  setPointsSmoothly(points: number[][], tension: number = 0.5): this {
+    return this.setPoints3D(smoothBezierPoints(points, tension));
+  }
+
+  /**
+   * Return a world-space point at an arc-length proportion of this path.
+   * Separate compound contours are measured independently and never bridged.
+   */
+  pointFromProportion(proportion: number): Vector3Tuple {
+    const localPoint = pointAtBezierPathProportion(
+      this.getLocalPoints(),
+      this.getEffectiveSubpathLengths(),
+      proportion,
+    );
+    return this._localToWorld([localPoint[0] ?? 0, localPoint[1] ?? 0, localPoint[2] ?? 0]);
+  }
+
+  /**
    * Add straight line segments from the last point to each corner.
    * Each corner creates a new cubic Bezier segment with linear handles.
    * Matches Manim's add_points_as_corners.
@@ -334,6 +359,25 @@ export class VMobject extends VMobjectRendering {
     this._visiblePointCount = null;
     this._geometryDirty = true;
     this._markDirty();
+    return this;
+  }
+
+  /**
+   * Replace this VMobject's points with an exact interval of another
+   * VMobject's cubic Bézier geometry.
+   *
+   * Compound contours use the source's effective subpath metadata and remain
+   * disconnected in the result. Bounds are clamped to [0, 1].
+   */
+  pointwiseBecomePartial(source: VMobject, lower: number, upper: number): this {
+    const partial = partialBezierSubpaths(
+      source.getLocalPoints(),
+      source.getEffectiveSubpathLengths(),
+      lower,
+      upper,
+    );
+    this.setPoints3D(partial.points);
+    this.setTransformSubpathLengths(partial.subpathLengths);
     return this;
   }
 
@@ -639,9 +683,12 @@ export class VMobject extends VMobjectRendering {
     super._copyBaseAttributesInto(clone, options);
     clone._points3D = this._points3D.map((p) => [...p]);
     clone._visiblePointCount = this._visiblePointCount;
-    if (this._transformSubpathLengths !== undefined) {
-      clone._transformSubpathLengths = [...this._transformSubpathLengths];
-    }
+    clone._baseSubpathLengths = this._baseSubpathLengths
+      ? [...this._baseSubpathLengths]
+      : undefined;
+    clone._transformSubpathLengths = this._transformSubpathLengths
+      ? [...this._transformSubpathLengths]
+      : undefined;
     clone._geometryDirty = true;
   }
 

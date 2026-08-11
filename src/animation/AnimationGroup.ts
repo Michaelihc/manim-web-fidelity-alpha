@@ -157,9 +157,7 @@ export class AnimationGroup extends Animation {
         localAlpha = animDuration > 0 ? localTime / animDuration : 1;
       }
 
-      // Apply the animation's rate function
-      const transformedAlpha = anim.rateFunc(localAlpha);
-      anim.interpolate(transformedAlpha);
+      anim.interpolateRawAlpha(localAlpha);
     }
   }
 
@@ -180,13 +178,29 @@ export class AnimationGroup extends Animation {
     return this._isFinished || this.animations.every((anim) => anim.isFinished());
   }
 
+  override getAllMobjects(): readonly Mobject[] {
+    const result: Mobject[] = [];
+    const seen = new Set<Mobject>();
+    for (const animation of this.animations) {
+      for (const mobject of animation.getAllMobjects()) {
+        if (!seen.has(mobject)) {
+          seen.add(mobject);
+          result.push(mobject);
+        }
+      }
+    }
+    return result;
+  }
+
   /**
    * Reset the animation group
    */
   override reset(): void {
     super.reset();
-    for (const anim of this.animations) {
-      anim.reset();
+    // Child begin() calls run in array order, so later children may snapshot
+    // state produced by earlier children. Unwind that state stack in reverse.
+    for (let index = this.animations.length - 1; index >= 0; index--) {
+      this.animations[index].reset();
     }
   }
 }

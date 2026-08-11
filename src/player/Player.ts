@@ -145,19 +145,24 @@ export class Player {
     this._activeLoopSlideIndex = null;
     this._slidesTargetSlideIndex = -1;
 
-    // Record
-    const recorder = new RecordingScene(this._scene, this._masterTimeline);
-    await builder(recorder);
+    // Keep auto-render suppressed across every await in the recording builder.
+    // MathTex-heavy recordings otherwise render the entire growing scene after
+    // each awaited formula, even though none of those construction states is a
+    // user-visible frame. Nested timeline batching is folded into this one
+    // transaction and the completed alpha-zero frame renders exactly once.
+    await this._scene.batch(async () => {
+      const recorder = new RecordingScene(this._scene, this._masterTimeline);
+      await builder(recorder);
 
-    // Build the slide list from recorded segments + slide boundaries.
-    this._masterTimeline.finalizeSlides();
+      // Build the slide list from recorded segments + slide boundaries.
+      this._masterTimeline.finalizeSlides();
 
-    // Set the master timeline on the scene
-    this._scene.setTimeline(this._masterTimeline);
+      // Set the master timeline on the scene
+      this._scene.setTimeline(this._masterTimeline);
 
-    // Seek to start to show initial state
-    this._masterTimeline.seek(0);
-    this._scene.render();
+      // Seek to start to show initial state
+      this._masterTimeline.seek(0);
+    });
 
     // Update UI with segment markers
     this._ui.setSegments(this._masterTimeline);
@@ -241,6 +246,36 @@ export class Player {
     this._masterTimeline.seek(time);
     this._scene.render();
     this._ui.updateTime(this._masterTimeline.getCurrentTime(), this._masterTimeline.getDuration());
+  }
+
+  /**
+   * Render one deterministic export frame.
+   *
+   * Unlike seek(), this advances updaters on the mobjects that are active
+   * after the timeline reaches `time`. The caller owns the export clock and
+   * supplies its exact delta (normally 1 / fps; use 0 for frame zero).
+   *
+   * The whole operation is one Scene batch so updater-driven add/remove calls
+   * and a backward timeline rebuild still produce exactly one rendered frame.
+   * UI and slide-navigation state are intentionally untouched: this is a
+   * low-overhead frame extraction path, not an interactive seek.
+   */
+  renderExportFrame(time: number, updaterDelta: number): void {
+    if (!Number.isFinite(time)) {
+      throw new TypeError('Player.renderExportFrame requires a finite time');
+    }
+    if (!Number.isFinite(updaterDelta) || updaterDelta < 0) {
+      throw new TypeError('Player.renderExportFrame requires a finite, non-negative updater delta');
+    }
+
+    this._scene.batch(() => {
+      this._masterTimeline.seek(time);
+      if (updaterDelta > 0) {
+        for (const mobject of this._scene.mobjects) {
+          mobject.update(updaterDelta);
+        }
+      }
+    });
   }
 
   /**

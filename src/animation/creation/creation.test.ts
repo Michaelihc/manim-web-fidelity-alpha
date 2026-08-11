@@ -133,9 +133,9 @@ describe('Create', () => {
   });
 
   describe('constructor', () => {
-    it('sets default duration to 2', () => {
+    it('sets Manim-compatible default duration to 1', () => {
       const anim = new Create(mob);
-      expect(anim.duration).toBe(2);
+      expect(anim.duration).toBe(1);
     });
 
     it('accepts custom duration', () => {
@@ -273,10 +273,10 @@ describe('create() factory', () => {
     expect(anim.rateFunc).toBe(linear);
   });
 
-  it('default duration is 2', () => {
+  it('default duration is 1', () => {
     const mob = new MockPlainMobject();
     const anim = create(mob);
-    expect(anim.duration).toBe(2);
+    expect(anim.duration).toBe(1);
   });
 });
 
@@ -1254,19 +1254,42 @@ describe('ShowIncreasingSubsets', () => {
       expect(child3.opacity).toBe(0);
     });
 
-    it('stores original opacities', () => {
+    it('preserves independent fill/stroke paint through begin, interpolation, and reset', () => {
       const parent = new MockPlainMobject();
       const child1 = new MockPlainMobject();
       const child2 = new MockPlainMobject();
-      child1.opacity = 0.5;
-      child2.opacity = 0.9;
+      child1.setFill('#ff0000', 0.5);
+      child1.setStroke('#00ff00', 7, 0.2);
+      child2.setFill('#0000ff', 0.9);
+      child2.setStroke('#ffff00', 3, 0.6);
       parent.add(child1);
       parent.add(child2);
 
       const anim = new ShowIncreasingSubsets(parent);
       anim.begin();
 
-      expect((anim as any)._originalOpacities).toEqual([0.5, 0.9]);
+      expect(child1.fillOpacity).toBe(0);
+      expect(child1.opacity).toBe(0);
+      expect(child2.fillOpacity).toBe(0);
+      expect(child2.opacity).toBe(0);
+
+      anim.interpolate(0.25);
+      expect(child1.fillOpacity).toBeCloseTo(0.25);
+      expect(child1.opacity).toBeCloseTo(0.1);
+      expect(child2.fillOpacity).toBe(0);
+      expect(child2.opacity).toBe(0);
+
+      anim.reset();
+      expect(child1.fillOpacity).toBeCloseTo(0.5);
+      expect(child1.opacity).toBeCloseTo(0.2);
+      expect(child1.fillColor).toBe('#ff0000');
+      expect(child1.strokeColor).toBe('#00ff00');
+      expect(child1.strokeWidth).toBe(7);
+      expect(child2.fillOpacity).toBeCloseTo(0.9);
+      expect(child2.opacity).toBeCloseTo(0.6);
+      expect(child2.fillColor).toBe('#0000ff');
+      expect(child2.strokeColor).toBe('#ffff00');
+      expect(child2.strokeWidth).toBe(3);
     });
   });
 

@@ -1219,16 +1219,18 @@ describe('MoveAlongPath', () => {
       expect(m.position.y).toBeCloseTo(0, 3);
     });
 
-    it('at alpha=1/3 is at end of first segment', () => {
+    it('at alpha=1/3 follows the path arc-length parameterization', () => {
       const path = makeVMobject(threeSegmentPoints());
       const m = makeVMobject();
       const anim = new MoveAlongPath(m, { path });
       anim.begin();
-      // 1/3 of 3 segments = segment 1 at t=0 (actually end of first segment)
+
+      const expected = path.pointFromProportion(1 / 3);
       anim.interpolate(1 / 3);
-      // End of first segment is anchor 1: (1, 1, 0)
-      expect(m.position.x).toBeCloseTo(1, 3);
-      expect(m.position.y).toBeCloseTo(1, 3);
+
+      expect(m.position.x).toBeCloseTo(expected[0], 5);
+      expect(m.position.y).toBeCloseTo(expected[1], 5);
+      expect(m.position.z).toBeCloseTo(expected[2], 5);
     });
   });
 });

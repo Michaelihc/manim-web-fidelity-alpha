@@ -459,12 +459,32 @@ describe('NumberLine – uncovered branches', () => {
     expect(copy.getXRange()).toEqual(nl.getXRange());
     expect(copy.getLength()).toBe(8);
   });
+
+  it('copy preserves root and regenerated tick stroke opacity', () => {
+    const line = new NumberLine({
+      xRange: [0, 2, 1],
+      strokeOpacity: 0.35,
+      includeTicks: true,
+    });
+    const copy = line.copy();
+
+    expect(copy.opacity).toBeCloseTo(0.35);
+    expect(copy.children.length).toBeGreaterThan(0);
+    expect(copy.children.every((child) => child.opacity === 0.35)).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // UnitInterval – uncovered branches
 // ---------------------------------------------------------------------------
 describe('UnitInterval – uncovered branches', () => {
+  it('copy preserves root and tick stroke opacity', () => {
+    const interval = new UnitInterval({ strokeOpacity: 0.4 });
+    const copy = interval.copy();
+    expect(copy.opacity).toBeCloseTo(0.4);
+    expect(copy.children.every((child) => child.opacity === 0.4)).toBe(true);
+  });
+
   it('numDecimalPlaces=0 gives step 0.5; copy preserves it', () => {
     const ui = new UnitInterval({ numDecimalPlaces: 0 });
     expect(closeTo(ui.getXRange()[2], 0.5)).toBe(true);

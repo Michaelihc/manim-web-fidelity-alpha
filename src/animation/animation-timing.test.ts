@@ -156,6 +156,30 @@ describe('Timeline', () => {
     });
   });
 
+  describe('addWait', () => {
+    it('holds the preceding state and positions the next animation after the gap', () => {
+      const first = anim(1);
+      const second = anim(1);
+
+      tl.add(first).addWait(0.5).add(second);
+
+      expect(tl.getDuration()).toBeCloseTo(2.5, 5);
+      expect(tl.length).toBe(2);
+
+      tl.seek(1.25);
+      expect(first.lastAlpha).toBe(1);
+      expect(second.lastAlpha).toBeNull();
+
+      tl.seek(2);
+      expect(second.lastAlpha).toBeCloseTo(0.5, 5);
+    });
+
+    it('is cleared together with the rest of the timeline', () => {
+      tl.add(anim(1)).addWait(0.5).clear().add(anim(1));
+      expect(tl.getDuration()).toBeCloseTo(1, 5);
+    });
+  });
+
   describe('play / pause / reset / update / seek / clear', () => {
     it('play/pause toggles isPlaying', () => {
       tl.play();
@@ -215,6 +239,7 @@ describe('Timeline', () => {
     it('all mutating methods return this', () => {
       expect(tl.add(anim(1))).toBe(tl);
       expect(tl.addParallel([])).toBe(tl);
+      expect(tl.addWait(0)).toBe(tl);
       expect(tl.seek(0)).toBe(tl);
       expect(tl.play()).toBe(tl);
       expect(tl.pause()).toBe(tl);

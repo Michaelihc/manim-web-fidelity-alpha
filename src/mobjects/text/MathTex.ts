@@ -44,6 +44,9 @@ export interface MathTexOptions {
   macros?: Record<string, string>;
 }
 
+/** Fresh options temporarily marked by MathTex._createCopyShell(). */
+const copyShellOptions = new WeakSet<MathTexOptions>();
+
 export class MathTex extends VGroup {
   protected _latex: string;
   protected _fontSize: number;
@@ -66,6 +69,8 @@ export class MathTex extends VGroup {
 
   constructor(options: MathTexOptions) {
     super();
+
+    const isCopyShell = copyShellOptions.has(options);
 
     // Validate options via typia and read required latex field
     typia.assert<MathTexOptions>(options);
@@ -96,14 +101,27 @@ export class MathTex extends VGroup {
     this.position.set(position[0], position[1], position[2]);
 
     if (Array.isArray(latex)) {
-      // Multi-part mode: render the FULL expression as one MathJax call
-      // for correct layout, then split VMobjects into parts by glyph count.
       this._isMultiPart = true;
       this._latex = latex.join('');
-      this._renderPromise = this._renderMultiPart(latex);
     } else {
       this._isMultiPart = false;
       this._latex = latex as string;
+    }
+
+    // A rendered MathTex copy receives a complete frozen vector family below.
+    // Resolve readiness without starting any MathJax work: cancelling after an
+    // awaited conversion still pays the full conversion cost for every
+    // animation snapshot.
+    if (isCopyShell) {
+      this._renderPromise = Promise.resolve();
+      return;
+    }
+
+    if (Array.isArray(latex)) {
+      // Multi-part mode: render the FULL expression as one MathJax call
+      // for correct layout, then split VMobjects into parts by glyph count.
+      this._renderPromise = this._renderMultiPart(latex);
+    } else {
       this._startRender();
     }
   }
@@ -462,7 +480,7 @@ export class MathTex extends VGroup {
   private static _PartGroup = class extends VGroup {
     _latex: string = '';
     _color: string = WHITE;
-    constructor(_parent: MathTex) {
+    constructor(_parent?: MathTex) {
       super();
     }
 
@@ -480,13 +498,30 @@ export class MathTex extends VGroup {
     getLatex(): string {
       return this._latex;
     }
+
+    override copy(): VGroup {
+      const copy = new MathTex._PartGroup();
+      this._copyBaseAttributesInto(copy);
+      copy._latex = this._latex;
+      copy._color = this._color;
+      return copy;
+    }
   };
+
+  private static _createCopyShell(options: MathTexOptions): MathTex {
+    copyShellOptions.add(options);
+    try {
+      return new MathTex(options);
+    } finally {
+      copyShellOptions.delete(options);
+    }
+  }
 
   override copy(): MathTex {
     const latexValue = this._isMultiPart
       ? this._parts.map((p) => (p as unknown as { _latex: string })._latex)
       : this._latex;
-    const copy = new MathTex({
+    const options: MathTexOptions = {
       latex: latexValue,
       color: this._color,
       fontSize: this._fontSize,
@@ -496,8 +531,24 @@ export class MathTex extends VGroup {
       fillOpacity: this._svgFillOpacity,
       height: this._targetHeight,
       macros: this._macros,
-    });
+    };
+
+    if (this.children.length === 0) {
+      // Preserve lazy-copy behavior before the source has rendered: the new
+      // instance's own render will populate its family exactly once.
+      const copy = new MathTex(options);
+      this._copyBaseAttributesInto(copy, { copyChildren: false });
+      return copy;
+    }
+
+    // A rendered source already has the complete vector family. Build an
+    // already-ready shell so copying starts zero renderer conversions.
+    const copy = MathTex._createCopyShell(options);
     this._copyBaseAttributesInto(copy, { copyChildren: true });
+    copy._svgViewBoxWidth = this._svgViewBoxWidth;
+    if (this._isMultiPart) {
+      copy._parts = copy.children.slice(0, this._parts.length) as VGroup[];
+    }
     return copy;
   }
 }

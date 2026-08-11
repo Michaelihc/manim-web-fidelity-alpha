@@ -44,7 +44,7 @@ export class GifExporter {
    * Export the timeline as a GIF
    */
   async exportTimeline(duration?: number): Promise<Blob> {
-    const totalDuration = (duration || this._options.duration || this._getTimelineDuration()) ?? 5;
+    const totalDuration = this._resolveDuration(duration);
     const totalFrames = Math.ceil(totalDuration * this._options.fps);
     const frameDelay = Math.round(1000 / this._options.fps);
 
@@ -137,6 +137,23 @@ export class GifExporter {
       return timeline.getDuration();
     }
     return null;
+  }
+
+  /**
+   * Resolve a positive export duration. In particular, do not let the
+   * constructor's 0 sentinel or an empty timeline produce a zero-frame GIF.
+   */
+  private _resolveDuration(duration?: number): number {
+    const candidates = [duration, this._options.duration, this._getTimelineDuration()];
+    return (
+      candidates.find(
+        (candidate): candidate is number =>
+          candidate !== null &&
+          candidate !== undefined &&
+          Number.isFinite(candidate) &&
+          candidate > 0,
+      ) ?? 5
+    );
   }
 
   /**

@@ -39,7 +39,7 @@ export {
 export { AnimateProxy } from './core/AnimateProxy';
 export { UP, DOWN, LEFT, RIGHT, IN, OUT, ORIGIN, UL, UR, DL, DR } from './core/Mobject';
 export { VMobject, type Point } from './core/VMobject';
-export { VGroup } from './core/VGroup';
+export { VGroup, type ArrangeOptions } from './core/VGroup';
 export { VDict, VectorizedPoint } from './core/VDict';
 export { Group } from './core/Group';
 export { Scene, type SceneOptions, type SceneExportOptions } from './core/Scene';
@@ -551,7 +551,7 @@ export {
 } from './animation/MasterTimeline';
 
 // Animation types
-export { FadeIn, fadeIn, FadeOut, fadeOut } from './animation/fading';
+export { FadeIn, fadeIn, FadeOut, fadeOut, type FadeOptions } from './animation/fading';
 export {
   Create,
   create,
@@ -589,6 +589,7 @@ export {
   type TypeWithCursorOptions,
   type UntypeWithCursorOptions,
   type CreateOptions,
+  type DrawBorderThenFillOptions,
   type WriteOptions,
   type AddTextLetterByLetterOptions,
 } from './animation/creation';

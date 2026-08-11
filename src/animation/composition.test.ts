@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Mobject } from '../core/Mobject';
+import { Animation } from './Animation';
 import { AnimationGroup } from './AnimationGroup';
 import { Succession, succession } from './Succession';
 import { FadeIn } from './fading/FadeIn';
@@ -11,6 +12,77 @@ import { linear } from '../rate-functions';
 function createFadeIn(duration: number = 1): FadeIn {
   const m = new Mobject();
   return new FadeIn(m, { duration, rateFunc: linear });
+}
+
+class LifecycleAnimation extends Animation {
+  beginCount = 0;
+  finishCount = 0;
+  resetCount = 0;
+  active = false;
+  lastAlpha: number | null = null;
+
+  constructor(duration: number = 1) {
+    super(new Mobject(), { duration, rateFunc: linear });
+  }
+
+  override begin(): void {
+    this.beginCount++;
+    this.active = true;
+    super.begin();
+  }
+
+  override interpolate(alpha: number): void {
+    this.lastAlpha = alpha;
+  }
+
+  override finish(): void {
+    this.finishCount++;
+    this.active = false;
+    super.finish();
+  }
+
+  override reset(): void {
+    this.resetCount++;
+    this.active = false;
+    this.lastAlpha = null;
+    super.reset();
+  }
+}
+
+class RawDispatchAnimation extends Animation {
+  rawAlphas: number[] = [];
+  easedAlphas: number[] = [];
+
+  constructor(duration: number = 1) {
+    super(new Mobject(), { duration, rateFunc: (alpha) => alpha * alpha });
+  }
+
+  protected override _interpolateRawAlpha(rawAlpha: number): void {
+    this.rawAlphas.push(rawAlpha);
+    super._interpolateRawAlpha(rawAlpha);
+  }
+
+  override interpolate(alpha: number): void {
+    this.easedAlphas.push(alpha);
+  }
+}
+
+class BeginEndpointAnimation extends Animation {
+  constructor(
+    mobject: Mobject,
+    private readonly endpointX: number,
+  ) {
+    super(mobject, { rateFunc: linear });
+  }
+
+  override begin(): void {
+    super.begin();
+    this.interpolate(1);
+  }
+
+  override interpolate(alpha: number): void {
+    this.mobject.position.x = this.endpointX * alpha;
+  }
 }
 
 describe('AnimationGroup', () => {
@@ -131,6 +203,17 @@ describe('AnimationGroup', () => {
   });
 
   describe('interpolate() with lagRatio=0 (parallel)', () => {
+    it('dispatches raw child progress so subclass easing runs exactly once', () => {
+      const child = new RawDispatchAnimation();
+      const group = new AnimationGroup([child]);
+      group.begin();
+
+      group.interpolate(0.5);
+
+      expect(child.rawAlphas.at(-1)).toBeCloseTo(0.5);
+      expect(child.easedAlphas.at(-1)).toBeCloseTo(0.25);
+    });
+
     it('all animations get same alpha when same duration', () => {
       const a1 = createFadeIn(1);
       const a2 = createFadeIn(1);
@@ -361,6 +444,23 @@ describe('AnimationGroup', () => {
       expect(a1.isFinished()).toBe(false);
       expect(a2.isFinished()).toBe(false);
     });
+
+    it('unwinds nested child snapshots in reverse lifecycle order', () => {
+      const mobject = new Mobject();
+      const first = new BeginEndpointAnimation(mobject, 1);
+      const second = new BeginEndpointAnimation(mobject, 2);
+      const third = new BeginEndpointAnimation(mobject, 3);
+      const inner = new AnimationGroup([first, second], { lagRatio: 1 });
+      const outer = new AnimationGroup([inner, third], { lagRatio: 1 });
+
+      // Each later begin snapshots the endpoint installed by the preceding
+      // child: 0 -> 1 -> 2 -> 3.
+      outer.begin();
+      expect(mobject.position.x).toBe(3);
+
+      outer.reset();
+      expect(mobject.position.x).toBe(0);
+    });
   });
 
   describe('animationGroup() factory function', () => {
@@ -384,6 +484,19 @@ describe('AnimationGroup', () => {
 
 describe('Succession', () => {
   describe('class', () => {
+    it('dispatches raw active-child progress so subclass easing runs exactly once', () => {
+      const first = new RawDispatchAnimation();
+      const second = new RawDispatchAnimation();
+      const sequence = new Succession([first, second]);
+      sequence.begin();
+
+      sequence.interpolate(0.25);
+
+      expect(first.rawAlphas.at(-1)).toBeCloseTo(0.5);
+      expect(first.easedAlphas.at(-1)).toBeCloseTo(0.25);
+      expect(second.rawAlphas).toEqual([]);
+    });
+
     it('creates an AnimationGroup with lagRatio=1', () => {
       const a1 = createFadeIn(1);
       const a2 = createFadeIn(1);
@@ -408,7 +521,8 @@ describe('Succession', () => {
       // At alpha=0.25, groupTime=0.5 => first at 0.5, second at 0
       s.interpolate(0.25);
       expect(a1.mobject.opacity).toBeCloseTo(0.5, 5);
-      expect(a2.mobject.opacity).toBeCloseTo(0, 5);
+      // The future child has not begun yet, so its state is untouched.
+      expect(a2.mobject.opacity).toBeCloseTo(1, 5);
 
       // At alpha=0.75, groupTime=1.5 => first done, second at 0.5
       s.interpolate(0.75);
@@ -428,6 +542,59 @@ describe('Succession', () => {
       const s = new Succession([]);
       expect(s.duration).toBe(0);
     });
+
+    it('begins only the active child and advances lifecycle at boundaries', () => {
+      const a1 = new LifecycleAnimation(1);
+      const a2 = new LifecycleAnimation(1);
+      const s = new Succession([a1, a2]);
+
+      s.begin();
+      expect(a1.beginCount).toBe(1);
+      expect(a2.beginCount).toBe(0);
+
+      s.interpolate(0.49);
+      expect(a1.active).toBe(true);
+      expect(a2.beginCount).toBe(0);
+
+      s.interpolate(0.5);
+      expect(a1.finishCount).toBe(1);
+      expect(a1.lastAlpha).toBe(1);
+      expect(a1.active).toBe(false);
+      expect(a2.beginCount).toBe(1);
+      expect(a2.active).toBe(true);
+
+      s.interpolate(1);
+      expect(a2.finishCount).toBe(1);
+      expect(a2.lastAlpha).toBe(1);
+      expect(a2.active).toBe(false);
+      expect(s.isFinished()).toBe(true);
+    });
+
+    it('rebuilds the active child when seeking backward and after reset', () => {
+      const a1 = new LifecycleAnimation(1);
+      const a2 = new LifecycleAnimation(1);
+      const s = new Succession([a1, a2]);
+
+      s.begin();
+      s.interpolate(0.75);
+      expect(a1.active).toBe(false);
+      expect(a2.active).toBe(true);
+      expect(a2.lastAlpha).toBeCloseTo(0.5, 5);
+
+      s.interpolate(0.25);
+      expect(a1.active).toBe(true);
+      expect(a1.lastAlpha).toBeCloseTo(0.5, 5);
+      expect(a2.active).toBe(false);
+      expect(a2.lastAlpha).toBeNull();
+
+      s.reset();
+      expect(a1.active).toBe(false);
+      expect(a2.active).toBe(false);
+
+      s.begin();
+      expect(a1.active).toBe(true);
+      expect(a2.active).toBe(false);
+    });
   });
 
   describe('succession() factory function', () => {
@@ -436,6 +603,7 @@ describe('Succession', () => {
       const a2 = createFadeIn(1);
       const s = succession([a1, a2]);
       expect(s).toBeInstanceOf(AnimationGroup);
+      expect(s).toBeInstanceOf(Succession);
       expect(s.lagRatio).toBe(1);
     });
 
@@ -455,7 +623,7 @@ describe('Succession', () => {
       // First animation at halfway
       s.interpolate(0.25);
       expect(a1.mobject.opacity).toBeCloseTo(0.5, 5);
-      expect(a2.mobject.opacity).toBeCloseTo(0, 5);
+      expect(a2.mobject.opacity).toBeCloseTo(1, 5);
     });
 
     it('accepts rateFunc option', () => {

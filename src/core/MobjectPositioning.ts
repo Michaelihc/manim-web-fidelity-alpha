@@ -1,10 +1,4 @@
-import * as THREE from 'three';
 import type { MobjectLike, Vector3Tuple } from './MobjectTypes';
-
-// Performance optimization: Object pooling for temporary vectors
-// These are shared to avoid allocation in hot paths
-const tempVec3: THREE.Vector3 = new THREE.Vector3();
-const tempBox3: THREE.Box3 = new THREE.Box3();
 
 /**
  * Get the center point of a mobject.
@@ -23,12 +17,17 @@ export function getBoundingBoxImpl(mob: MobjectLike): {
   height: number;
   depth: number;
 } {
-  // Same world-matrix sync as getBounds() (unlike getBounds, returns zero size
-  // for empty mobjects rather than throwing).
-  const obj = mob._syncWorldMatrices();
-  tempBox3.setFromObject(obj);
-  tempBox3.getSize(tempVec3);
-  return { width: tempVec3.x, height: tempVec3.y, depth: tempVec3.z };
+  // VMobject supplies a point-based getBounds() implementation because Three's
+  // Box3 cannot reliably measure Line2 geometry. Going through the polymorphic
+  // bounds API keeps generic sizing helpers correct for every mobject family.
+  // Empty containers retain their historical zero-size bounding box.
+  if (mob.isEmpty()) return { width: 0, height: 0, depth: 0 };
+  const bounds = mob.getBounds();
+  return {
+    width: bounds.max.x - bounds.min.x,
+    height: bounds.max.y - bounds.min.y,
+    depth: bounds.max.z - bounds.min.z,
+  };
 }
 
 /**
@@ -58,11 +57,12 @@ export function toEdgeImpl(
   const frameWidth = frameDimensions?.[0] ?? 14;
   const frameHeight = frameDimensions?.[1] ?? 8;
   const bbox = mob.getBoundingBox();
+  const center = mob.getCenter();
 
   const targetX =
-    direction[0] !== 0 ? direction[0] * (frameWidth / 2 - buff - bbox.width / 2) : mob.position.x;
+    direction[0] !== 0 ? direction[0] * (frameWidth / 2 - buff - bbox.width / 2) : center[0];
   const targetY =
-    direction[1] !== 0 ? direction[1] * (frameHeight / 2 - buff - bbox.height / 2) : mob.position.y;
+    direction[1] !== 0 ? direction[1] * (frameHeight / 2 - buff - bbox.height / 2) : center[1];
 
-  mob.moveTo([targetX, targetY, mob.position.z]);
+  mob.moveTo([targetX, targetY, center[2]]);
 }

@@ -59,15 +59,14 @@ function tokenizePath(d: string): Array<{ cmd: string; args: number[] }> {
 
   for (const seg of segments) {
     const cmd = seg[0];
-    const raw = seg.slice(1).trim();
+    const raw = seg.slice(1);
+    // A sign starts a new SVG number even when there is no comma or
+    // whitespace before it (for example, `M36-148`).  MathJax's TeX font
+    // deliberately emits this compact form.  Extract complete SVG numbers
+    // instead of splitting on separators so decimals and signed exponents
+    // remain unambiguous as well.
     const args =
-      raw.length > 0
-        ? raw
-            .replace(/([0-9])-([0-9])/g, '$1 -$2')
-            .split(/[\s,]+/)
-            .filter(Boolean)
-            .map(Number)
-        : [];
+      raw.match(/[+-]?(?:(?:\d+\.\d*)|(?:\.\d+)|(?:\d+))(?:[eE][+-]?\d+)?/g)?.map(Number) ?? [];
     tokens.push({ cmd, args });
   }
   return tokens;
@@ -467,7 +466,13 @@ export function svgToVMobjects(
   // Keep renderer units unchanged here. Caller controls world conversion.
   const worldScale = scaleFactor;
 
-  function walkElement(el: Element, accTx: number, accTy: number, accScale: number): void {
+  function walkElement(
+    el: Element,
+    accTx: number,
+    accTy: number,
+    accScaleX: number,
+    accScaleY: number,
+  ): void {
     const tag = el.tagName.toLowerCase();
 
     // Skip <defs> — we collected them above
@@ -479,11 +484,17 @@ export function svgToVMobjects(
     // Handle <g> transform: translate and scale
     // SVG transforms apply left-to-right in the attribute string.
     // For "translate(a,b) scale(s)": point p → (a + s*p.x, b + s*p.y)
-    // We accumulate into (accTx, accTy, accScale) so that:
-    //   worldPoint = (accTx + accScale * localPoint) * worldScale
+    // Keep X/Y scales separate: MathJax stretches extensible glyph pieces
+    // anisotropically (for example, an underbrace's horizontal extender uses
+    // scale(13.039, 1)).
+    //
+    // We accumulate into (accTx, accTy, accScaleX, accScaleY) so that:
+    //   worldX = (accTx + accScaleX * localX) * worldScale
+    //   worldY = (accTy + accScaleY * localY) * worldScale
     let localTx = accTx;
     let localTy = accTy;
-    let localScale = accScale;
+    let localScaleX = accScaleX;
+    let localScaleY = accScaleY;
     const transform = el.getAttribute('transform');
     if (transform) {
       const regex = /(translate|scale)\s*\(([^)]*)\)/g;
@@ -495,10 +506,13 @@ export function svgToVMobjects(
           .filter(Boolean)
           .map(Number);
         if (type === 'translate') {
-          localTx += localScale * (args[0] || 0);
-          localTy += localScale * (args[1] || 0);
+          localTx += localScaleX * (args[0] ?? 0);
+          localTy += localScaleY * (args[1] ?? 0);
         } else if (type === 'scale') {
-          localScale *= args[0] || 1;
+          const scaleX = args[0] ?? 1;
+          const scaleY = args[1] ?? scaleX;
+          localScaleX *= scaleX;
+          localScaleY *= scaleY;
         }
       }
     }
@@ -510,7 +524,8 @@ export function svgToVMobjects(
           d,
           localTx,
           localTy,
-          localScale,
+          localScaleX,
+          localScaleY,
           worldScale,
           flipY,
           color,
@@ -532,9 +547,10 @@ export function svgToVMobjects(
       if (d) {
         const vmob = pathDataToVMobject(
           d,
-          localTx + localScale * useX,
-          localTy + localScale * useY,
-          localScale,
+          localTx + localScaleX * useX,
+          localTy + localScaleY * useY,
+          localScaleX,
+          localScaleY,
           worldScale,
           flipY,
           color,
@@ -554,7 +570,8 @@ export function svgToVMobjects(
           d,
           localTx,
           localTy,
-          localScale,
+          localScaleX,
+          localScaleY,
           worldScale,
           flipY,
           color,
@@ -567,11 +584,11 @@ export function svgToVMobjects(
 
     // Recurse into children
     for (const child of el.children) {
-      walkElement(child, localTx, localTy, localScale);
+      walkElement(child, localTx, localTy, localScaleX, localScaleY);
     }
   }
 
-  walkElement(svgElement, 0, 0, 1);
+  walkElement(svgElement, 0, 0, 1, 1);
 
   return group;
 }
@@ -581,16 +598,17 @@ export function svgToVMobjects(
  * Applies accumulated translation, element scale, world scale, and optional Y-flip.
  *
  * The final position for each path point (px, py) is:
- *   worldX = (accTx + elementScale * px) * worldScale
- *   worldY = ±(accTy + elementScale * py) * worldScale   (sign depends on flipY)
+ *   worldX = (accTx + elementScaleX * px) * worldScale
+ *   worldY = ±(accTy + elementScaleY * py) * worldScale   (sign depends on flipY)
  *
- * When elementScale=1, this reduces to (px + accTx) * worldScale (original behavior).
+ * When both element scales are 1, this reduces to translated source coordinates.
  */
 function pathDataToVMobject(
   d: string,
   accTx: number,
   accTy: number,
-  elementScale: number,
+  elementScaleX: number,
+  elementScaleY: number,
   worldScale: number,
   flipY: boolean,
   color: string,
@@ -609,10 +627,10 @@ function pathDataToVMobject(
   for (const sp of subPaths) {
     const startLen = allPoints.length;
     for (const [px, py] of sp) {
-      const x = (accTx + elementScale * px) * worldScale;
+      const x = (accTx + elementScaleX * px) * worldScale;
       const y = flipY
-        ? -(accTy + elementScale * py) * worldScale
-        : (accTy + elementScale * py) * worldScale;
+        ? -(accTy + elementScaleY * py) * worldScale
+        : (accTy + elementScaleY * py) * worldScale;
       allPoints.push([x, y, 0]);
     }
     const count = allPoints.length - startLen;

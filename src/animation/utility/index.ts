@@ -13,6 +13,12 @@ import { Mobject, Vector3Tuple } from '../../core/Mobject';
 import { Animation, AnimationOptions } from '../Animation';
 import { linear } from '../../rate-functions';
 import { resolveExtremalPoint } from '../../core/MobjectState';
+import {
+  applyPaintOpacityFactor,
+  capturePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from '../transform/PaintOpacity';
 
 // ============================================================================
 // Add Animation
@@ -71,6 +77,8 @@ export type RemoveOptions = AnimationOptions;
  * For actual scene removal, use scene.remove() directly.
  */
 export class Remove extends Animation {
+  private _paint: PaintOpacitySnapshot = [];
+
   constructor(mobject: Mobject, options: RemoveOptions = {}) {
     super(mobject, { ...options, duration: 0 });
   }
@@ -80,7 +88,8 @@ export class Remove extends Animation {
    */
   override begin(): void {
     super.begin();
-    this.mobject.opacity = 0;
+    this._paint = capturePaintOpacity(this.mobject);
+    applyPaintOpacityFactor(this._paint, 0);
     this.mobject._markDirty();
   }
 
@@ -88,6 +97,11 @@ export class Remove extends Animation {
    * No interpolation needed for instant remove
    */
   interpolate(_alpha: number): void {}
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._paint);
+  }
 }
 
 /**
@@ -314,6 +328,7 @@ export class Broadcast extends Animation {
 
   /** Copies of the mobject */
   private _copies: Mobject[] = [];
+  private _copyPaint = new Map<Mobject, PaintOpacitySnapshot>();
 
   /** Original mobject width (for scale computation) */
   private _originalWidth: number = 1;
@@ -351,8 +366,10 @@ export class Broadcast extends Animation {
 
     // Create N copies
     this._copies = [];
+    this._copyPaint.clear();
     for (let i = 0; i < this.nMobs; i++) {
       const copy = this.mobject.copy();
+      const paint = capturePaintOpacity(copy);
 
       // Position at focal point
       copy.position.set(this.focalPoint[0], this.focalPoint[1], this.focalPoint[2]);
@@ -362,7 +379,7 @@ export class Broadcast extends Animation {
       copy.scaleVector.copy(this._originalScale).multiplyScalar(Math.max(scaleFactor, 0));
 
       // Set initial opacity
-      copy.setStrokeOpacity(this.initialOpacity);
+      applyPaintOpacityFactor(paint, this.initialOpacity);
       copy._markDirty();
 
       // Add the copy's Three.js object to the parent
@@ -370,6 +387,7 @@ export class Broadcast extends Animation {
       this._parentObject.add(copyThree);
 
       this._copies.push(copy);
+      this._copyPaint.set(copy, paint);
     }
   }
 
@@ -408,7 +426,8 @@ export class Broadcast extends Animation {
       // Interpolate opacity: from initialOpacity to finalOpacity
       const currentOpacity =
         this.initialOpacity + (this.finalOpacity - this.initialOpacity) * localAlpha;
-      copy.setStrokeOpacity(currentOpacity);
+      const paint = this._copyPaint.get(copy);
+      if (paint) applyPaintOpacityFactor(paint, currentOpacity);
 
       copy._markDirty();
       // Sync Three.js object so visual updates are applied
@@ -437,9 +456,26 @@ export class Broadcast extends Animation {
       }
     }
     this._copies = [];
+    this._copyPaint.clear();
     this._parentObject = null;
 
     super.finish();
+  }
+
+  override reset(): void {
+    this._removeCopies();
+    super.reset();
+  }
+
+  private _removeCopies(): void {
+    if (this._parentObject) {
+      for (const copy of this._copies) {
+        this._parentObject.remove(copy.getThreeObject());
+      }
+    }
+    this._copies = [];
+    this._copyPaint.clear();
+    this._parentObject = null;
   }
 }
 

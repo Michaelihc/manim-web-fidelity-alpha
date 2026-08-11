@@ -145,10 +145,45 @@ export abstract class Animation {
   }
 
   /**
+   * Return every mobject participating in this animation.
+   *
+   * Composite and transform animations override this Manim-compatible hook
+   * so render-readiness and timeline visibility discovery do not mistake a
+   * dummy/group mobject for the actual animated family.
+   */
+  getAllMobjects(): readonly Mobject[] {
+    return [this.mobject];
+  }
+
+  /**
    * Apply the animation at a given progress value.
    * @param alpha Progress from 0 (start) to 1 (end)
    */
   abstract interpolate(alpha: number): void;
+
+  /**
+   * Convert timeline progress into subclass interpolation.
+   *
+   * Most animations ease the family as one unit. Creation animations override
+   * this hook because Manim applies the rate function after computing each
+   * lagged family member's local alpha.
+   */
+  protected _interpolateRawAlpha(rawAlpha: number): void {
+    this.interpolate(this.rateFunc(rawAlpha));
+  }
+
+  /**
+   * Dispatch uneased local progress through the animation's subclass hook.
+   *
+   * Composition animations must use this instead of applying rateFunc
+   * themselves: creation animations intentionally ease after computing each
+   * lagged family member's local progress.
+   *
+   * @internal
+   */
+  interpolateRawAlpha(rawAlpha: number): void {
+    this._interpolateRawAlpha(Math.max(0, Math.min(1, rawAlpha)));
+  }
 
   /**
    * Update the animation for the current frame.
@@ -166,8 +201,7 @@ export abstract class Animation {
 
     const elapsed = currentTime - this._startTime;
     const rawAlpha = this.duration > 0 ? Math.min(1, Math.max(0, elapsed / this.duration)) : 1;
-    const alpha = this.rateFunc(rawAlpha);
-    this.interpolate(alpha);
+    this.interpolateRawAlpha(rawAlpha);
 
     // Check if finished
     if (rawAlpha >= 1 && !this._isFinished) {
@@ -194,17 +228,21 @@ export abstract class Animation {
       this.mobject.position.copy(saved.position);
       this.mobject.rotation.copy(saved.rotation);
       this.mobject.scaleVector.copy(saved.scaleVector);
-      this.mobject.color = saved.color;
-      this.mobject.opacity = saved.opacity;
-      this.mobject.strokeWidth = saved.strokeWidth;
-      this.mobject.fillOpacity = saved.fillOpacity;
+      // Restore paint through the public setters so the renderer-facing style
+      // record and the live scalar fields cannot diverge.  Directly assigning
+      // strokeWidth/fillOpacity leaves `_style` at the animation's final paint;
+      // a subsequent exact-value setter then short-circuits and cannot repair
+      // that stale record.
+      this.mobject.setFill(saved.fillColor ?? saved.color, saved.fillOpacity);
+      this.mobject.setStroke(saved.color, saved.strokeWidth, saved.opacity);
 
-      // Restore VMobject points if applicable
+      // Restore leaf geometry structurally. A VGroup's getLocalPoints()
+      // aggregates its descendants, whose point counts may have changed
+      // during partial-path animations; feeding that aggregate back through
+      // VGroup.setPoints() before the leaves are restored violates its
+      // partition invariant.
       if (this.mobject instanceof VMobject && saved instanceof VMobject) {
-        const pts = saved.getLocalPoints();
-        if (pts && pts.length > 0) {
-          this.mobject.setPoints(pts);
-        }
+        this._restoreVMobjectFamilyPoints(this.mobject, saved);
       }
 
       this.mobject._markDirty();
@@ -212,6 +250,23 @@ export abstract class Animation {
     this._startTime = null;
     this._isFinished = false;
     this._hasBegun = false;
+  }
+
+  private _restoreVMobjectFamilyPoints(current: VMobject, saved: VMobject): void {
+    if (current.children.length === 0 && saved.children.length === 0) {
+      current.setPoints3D(saved.getLocalPoints());
+      return;
+    }
+
+    const childCount = Math.min(current.children.length, saved.children.length);
+    for (let index = 0; index < childCount; index++) {
+      const currentChild = current.children[index];
+      const savedChild = saved.children[index];
+      if (currentChild instanceof VMobject && savedChild instanceof VMobject) {
+        this._restoreVMobjectFamilyPoints(currentChild, savedChild);
+      }
+    }
+    current._markDirty();
   }
 
   /**

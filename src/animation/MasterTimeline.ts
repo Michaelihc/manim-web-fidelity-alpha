@@ -13,7 +13,9 @@
  */
 
 import { Animation } from './Animation';
-import { Timeline } from './Timeline';
+import { AnimationGroup } from './AnimationGroup';
+import { Timeline, TIMELINE_TIME_EPSILON } from './Timeline';
+import { Mobject } from '../core/Mobject';
 import { logger } from '../utils/logger';
 
 export interface Segment {
@@ -60,6 +62,11 @@ export interface SlideOptions {
   autoNext?: boolean;
 }
 
+interface PaintOpacitySnapshot {
+  readonly fillOpacity: number;
+  readonly strokeOpacity: number;
+}
+
 export class MasterTimeline extends Timeline {
   private _segments: Segment[] = [];
   private _slides: Slide[] = [];
@@ -73,50 +80,72 @@ export class MasterTimeline extends Timeline {
    * Maps mobjects to the segment index where they first appear.
    * Used by seek() to hide mobjects that haven't been introduced yet.
    */
-  private _mobjectFirstSegment: Map<Animation['mobject'], number> = new Map();
+  private _mobjectFirstSegment: Map<Mobject, number> = new Map();
   /**
-   * Saves each mobject's original opacity at addSegment() time,
-   * before any seek() hides it. Used to restore the correct opacity
-   * before animation begin() runs, preventing opacity corruption.
+   * Saves every introduced family member's independent fill/stroke opacity
+   * at addSegment() time, before any seek() hides it.
    */
-  private _savedMobjectOpacities: Map<Animation['mobject'], number> = new Map();
+  private _savedMobjectOpacities: Map<Mobject, PaintOpacitySnapshot> = new Map();
+  /** Backing Three.js visibility before timeline suppression first touched a member. */
+  private _savedThreeVisibility: Map<Mobject, boolean> = new Map();
+  /** Family members introduced by each segment, for O(crossed segments) reveals. */
+  private _introducedMobjectsBySegment: Map<number, Mobject[]> = new Map();
+  /** Future family members whose paint is currently suppressed. */
+  private _hiddenFutureMobjects: Set<Mobject> = new Set();
+  /** First segment whose introduction boundary has not been crossed. */
+  private _nextRevealSegmentIndex = 0;
+  /** False while recording/appending has left live mobjects at construction-time state. */
+  private _seekStateEstablished = false;
 
   /**
-   * Override seek to always reset ALL animations before re-applying.
-   * The base Timeline only resets future animations on backward seek,
-   * which leaves already-finished animations in their final state
-   * (e.g. a FadeOut'd mobject stays invisible when scrubbing back).
+   * Rebuild on backward seeks, but advance monotonically in place.
+   *
+   * A forward seek can safely finish the currently active animation and begin
+   * intervening animations in schedule order. Resetting the entire recording
+   * for every forward checkpoint is both unnecessary and prohibitively costly
+   * for MathTex-heavy timelines. Backward seeks still unwind every snapshot in
+   * reverse order before replaying, preserving exact arbitrary-seek behavior.
    */
   override seek(time: number): this {
-    // Reset every segment's animations to pristine state
-    for (const seg of this._segments) {
-      for (const anim of seg.animations) {
-        anim.reset();
+    const previousTime = this.getCurrentTime();
+    const targetTime = Math.max(0, Math.min(time, this.getDuration()));
+    const isBackward = targetTime < previousTime;
+    const needsRebuild = !this._seekStateEstablished || isBackward;
+
+    if (needsRebuild) {
+      // Unwind in reverse schedule order. Later animations snapshot the final
+      // state of earlier ones, so resetting forward would restore those later
+      // snapshots over the true initial state (and can violate VGroup topology
+      // invariants after a partial-path animation).
+      for (let segmentIndex = this._segments.length - 1; segmentIndex >= 0; segmentIndex--) {
+        const animations = this._segments[segmentIndex].animations;
+        for (let animationIndex = animations.length - 1; animationIndex >= 0; animationIndex--) {
+          animations[animationIndex].reset();
+        }
       }
-    }
 
-    // Clear started tracking so _updateAnimationsAtTime re-begins them
-    this._startedAnimations.clear();
+      // Clear started tracking so _updateAnimationsAtTime re-begins them.
+      this._startedAnimations.clear();
 
-    // Restore all mobjects to their original opacity before replaying.
-    // This ensures animation begin() captures the correct opacity,
-    // even if a previous begin() captured a value corrupted by hiding.
-    for (const [mobject, opacity] of this._savedMobjectOpacities) {
-      mobject.opacity = opacity;
+      // Restore all mobjects to their original paint opacity before replaying.
+      // This ensures animation begin() captures the correct opacity,
+      // even if a previous begin() captured a value corrupted by hiding.
+      for (const mobject of this._savedMobjectOpacities.keys()) {
+        this._restorePaintOpacity(mobject);
+      }
+      this._hiddenFutureMobjects.clear();
+    } else {
+      this._restoreIntroductionsThrough(targetTime);
     }
 
     // Delegate to parent which re-applies animations at target time
-    super.seek(time);
+    super.seek(targetTime);
+    this._seekStateEstablished = true;
 
-    // Hide mobjects whose introducing segment hasn't started yet.
-    // This must run AFTER super.seek() because Timeline.seek() calls
-    // reset() again on future animations (for backward seeks), which
-    // would restore their opacity and undo our hiding.
-    for (const [mobject, segIndex] of this._mobjectFirstSegment) {
-      const seg = this._segments[segIndex];
-      if (seg && time < seg.startTime) {
-        mobject.opacity = 0;
-      }
+    // A rebuild restores every snapshot, so establish the future-hidden state
+    // once afterward. Monotonic seeks reveal only newly crossed segments.
+    if (needsRebuild) {
+      this._hideIntroductionsAfter(targetTime);
     }
 
     return this;
@@ -129,39 +158,20 @@ export class MasterTimeline extends Timeline {
    * their segment boundary (not every frame).
    */
   override update(dt: number): void {
-    const prevTime = this.getCurrentTime();
-
-    // Restore original opacity for hidden future mobjects before super.update()
-    // so that animation begin() captures the correct value when the segment starts.
-    // Without this, Create animations using the opacity fallback path would capture
-    // opacity=0 (set by seek()) and compute 0*alpha=0 forever.
-    for (const [mobject, segIndex] of this._mobjectFirstSegment) {
-      const seg = this._segments[segIndex];
-      if (seg && prevTime < seg.startTime) {
-        const savedOpacity = this._savedMobjectOpacities.get(mobject);
-        if (savedOpacity !== undefined) {
-          mobject.opacity = savedOpacity;
-        }
-      }
+    if (!this.isPlaying()) return;
+    if (!this._seekStateEstablished) {
+      this.seek(this.getCurrentTime());
     }
-
+    const targetTime = Math.min(this.getDuration(), this.getCurrentTime() + Math.max(0, dt));
+    this._restoreIntroductionsThrough(targetTime);
     super.update(dt);
-    const newTime = this.getCurrentTime();
-
-    // Re-hide mobjects whose introducing segment still hasn't started
-    // and were not added immediately via `scene.add()`.
-    for (const [mobject, segIndex] of this._mobjectFirstSegment) {
-      const seg = this._segments[segIndex];
-      if (seg && newTime < seg.startTime && !mobject.createdAtBeginning) {
-        mobject.opacity = 0;
-      }
-    }
   }
 
   /**
    * Override reset to use seek(0) so future mobjects are hidden.
    */
   override reset(): this {
+    this._seekStateEstablished = false;
     this.seek(0);
     this.pause();
     return this;
@@ -171,6 +181,7 @@ export class MasterTimeline extends Timeline {
    * Add a segment containing one or more parallel animations.
    */
   addSegment(animations: Animation[]): Segment {
+    this._seekStateEstablished = false;
     const startTime = this.getDuration();
     this.addParallel(animations, startTime);
 
@@ -184,17 +195,131 @@ export class MasterTimeline extends Timeline {
       isWait: false,
     };
     this._segments.push(segment);
+    this._addSceneMembershipEvent(animations, startTime, segment.endTime);
 
-    // Track which segment first introduces each mobject and save its
-    // original opacity before any seek() hides it.
-    for (const anim of animations) {
-      if (!this._mobjectFirstSegment.has(anim.mobject)) {
-        this._mobjectFirstSegment.set(anim.mobject, segmentIndex);
-        this._savedMobjectOpacities.set(anim.mobject, anim.mobject.opacity);
+    // Track every paint participant, including transform targets. Targets are
+    // not added as independent roots by ordinary transforms, but cleanup-based
+    // replacements can introduce them. Recording their earliest participation
+    // prevents a later FadeOut from being mistaken for their first appearance.
+    // Register every family member at its earliest segment so animating a child
+    // again later cannot make it disappear between those segments.
+    for (const mobject of this._collectIntroducedMobjects(animations)) {
+      const family = typeof mobject.getFamily === 'function' ? mobject.getFamily() : [mobject];
+      for (const member of family) {
+        if (!this._mobjectFirstSegment.has(member)) {
+          this._mobjectFirstSegment.set(member, segmentIndex);
+          const introduced = this._introducedMobjectsBySegment.get(segmentIndex) ?? [];
+          introduced.push(member);
+          this._introducedMobjectsBySegment.set(segmentIndex, introduced);
+          this._savedMobjectOpacities.set(member, {
+            fillOpacity: member.fillOpacity,
+            strokeOpacity: member.opacity,
+          });
+        }
       }
     }
 
     return segment;
+  }
+
+  private _restorePaintOpacity(mobject: Mobject): void {
+    const snapshot = this._savedMobjectOpacities.get(mobject);
+    if (!snapshot) return;
+    const looseMobject = mobject as unknown as { fillOpacity: number; opacity: number };
+    // Bypass VGroup's family-propagating overrides: every member is tracked
+    // independently and keeps its own paint values.
+    if (mobject instanceof Mobject) {
+      Mobject.prototype.setFillOpacity.call(mobject, snapshot.fillOpacity);
+      Mobject.prototype.setStrokeOpacity.call(mobject, snapshot.strokeOpacity);
+    } else {
+      looseMobject.fillOpacity = snapshot.fillOpacity;
+      looseMobject.opacity = snapshot.strokeOpacity;
+    }
+    const savedThreeVisibility = this._savedThreeVisibility.get(mobject);
+    if (savedThreeVisibility !== undefined) {
+      mobject.getThreeObject().visible = savedThreeVisibility;
+    }
+    this._hiddenFutureMobjects.delete(mobject);
+  }
+
+  private _hidePaint(mobject: Mobject): void {
+    if (!this._savedMobjectOpacities.has(mobject) || this._hiddenFutureMobjects.has(mobject)) {
+      return;
+    }
+    const threeObject = mobject.getThreeObject();
+    if (!this._savedThreeVisibility.has(mobject)) {
+      this._savedThreeVisibility.set(mobject, threeObject.visible);
+    }
+    threeObject.visible = false;
+    const looseMobject = mobject as unknown as { fillOpacity: number; opacity: number };
+    if (mobject instanceof Mobject) {
+      Mobject.prototype.setFillOpacity.call(mobject, 0);
+      Mobject.prototype.setStrokeOpacity.call(mobject, 0);
+    } else {
+      looseMobject.fillOpacity = 0;
+      looseMobject.opacity = 0;
+    }
+    this._hiddenFutureMobjects.add(mobject);
+  }
+
+  private _restoreIntroductionsThrough(targetTime: number): void {
+    while (this._nextRevealSegmentIndex < this._segments.length) {
+      const segmentIndex = this._nextRevealSegmentIndex;
+      const segment = this._segments[segmentIndex];
+      if (!segment || segment.startTime > targetTime + TIMELINE_TIME_EPSILON) break;
+
+      for (const mobject of this._introducedMobjectsBySegment.get(segmentIndex) ?? []) {
+        if (this._hiddenFutureMobjects.has(mobject) && !mobject.createdAtBeginning) {
+          this._restorePaintOpacity(mobject);
+        }
+      }
+      this._nextRevealSegmentIndex++;
+    }
+  }
+
+  private _hideIntroductionsAfter(targetTime: number): void {
+    this._nextRevealSegmentIndex = this._firstSegmentAfter(targetTime);
+    for (
+      let segmentIndex = this._nextRevealSegmentIndex;
+      segmentIndex < this._segments.length;
+      segmentIndex++
+    ) {
+      for (const mobject of this._introducedMobjectsBySegment.get(segmentIndex) ?? []) {
+        if (!mobject.createdAtBeginning) this._hidePaint(mobject);
+      }
+    }
+  }
+
+  private _firstSegmentAfter(time: number): number {
+    let low = 0;
+    let high = this._segments.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this._segments[middle].startTime <= time + TIMELINE_TIME_EPSILON) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  private _collectIntroducedMobjects(animations: readonly Animation[]): Mobject[] {
+    const result: Mobject[] = [];
+    const seen = new Set<Mobject>();
+    const visit = (animation: Animation): void => {
+      if (animation instanceof AnimationGroup) {
+        for (const child of animation.animations) visit(child);
+        return;
+      }
+      for (const mobject of animation.getAllMobjects()) {
+        if (!seen.has(mobject)) {
+          seen.add(mobject);
+          result.push(mobject);
+        }
+      }
+    };
+    for (const animation of animations) {
+      visit(animation);
+    }
+    return result;
   }
 
   /**
@@ -475,8 +600,6 @@ class WaitAnimation extends Animation {
  * Never added to the scene — just satisfies the Animation constructor.
  */
 import * as THREE from 'three';
-import { Mobject } from '../core/Mobject';
-
 class DummyMobject extends Mobject {
   override normalizeTransform(worldMatrix: THREE.Matrix4 = this._ownMatrix()): this {
     return this._flattenAsContainer(worldMatrix);

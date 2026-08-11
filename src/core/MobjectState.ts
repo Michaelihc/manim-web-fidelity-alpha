@@ -8,9 +8,62 @@ interface MobjectInternals {
   _style: MobjectStyle;
 }
 
+interface SerializableMobjectState {
+  position: Vector3Tuple;
+  rotation: [number, number, number, string];
+  scale: Vector3Tuple;
+  zIndex: number;
+  color: string;
+  opacity: number;
+  strokeWidth: number;
+  fillOpacity: number;
+  style: MobjectStyle;
+  children: SerializableMobjectState[];
+}
+
 /** Helper to access protected/private members on MobjectLike at runtime. */
 function asInternal(m: MobjectLike): MobjectInternals {
   return m as unknown as MobjectInternals;
+}
+
+/**
+ * Build style metadata from the authoritative live channels.
+ *
+ * Some concrete constructors set the renderer-facing color and scalar paint
+ * fields directly. When both cached colors still match each other but differ
+ * from `color`, they are the stale base default rather than an intentional
+ * independent fill.
+ */
+function captureLiveStyle(mob: MobjectLike): MobjectStyle {
+  const style = asInternal(mob)._style;
+  const cachedColorsAreStale =
+    style.strokeColor !== undefined &&
+    style.fillColor === style.strokeColor &&
+    style.strokeColor !== mob.color;
+
+  return {
+    ...style,
+    fillColor: cachedColorsAreStale ? mob.color : (style.fillColor ?? mob.color),
+    strokeColor: mob.color,
+    fillOpacity: mob.fillOpacity,
+    strokeOpacity: mob.opacity,
+    strokeWidth: mob.strokeWidth,
+  };
+}
+
+function serializeMobjectState(mob: MobjectLike): SerializableMobjectState {
+  return {
+    position: [mob.position.x, mob.position.y, mob.position.z],
+    rotation: [mob.rotation.x, mob.rotation.y, mob.rotation.z, mob.rotation.order],
+    scale: [mob.scaleVector.x, mob.scaleVector.y, mob.scaleVector.z],
+    zIndex: mob.zIndex,
+    color: mob.color,
+    opacity: mob.opacity,
+    strokeWidth: mob.strokeWidth,
+    fillOpacity: mob.fillOpacity,
+    style: captureLiveStyle(mob),
+    children: mob.children.map(serializeMobjectState),
+  };
 }
 
 /**
@@ -21,12 +74,13 @@ function copyMobjectProperties(dst: MobjectLike, src: MobjectLike): void {
   dst.position.copy(src.position);
   dst.rotation.copy(src.rotation);
   dst.scaleVector.copy(src.scaleVector);
+  dst.zIndex = src.zIndex;
   dst.color = src.color;
   // Access protected members via runtime helper (bypasses TS access checks)
   asInternal(dst)._opacity = asInternal(src)._opacity;
   dst.strokeWidth = src.strokeWidth;
   dst.fillOpacity = src.fillOpacity;
-  asInternal(dst)._style = { ...asInternal(src)._style } as MobjectStyle;
+  asInternal(dst)._style = captureLiveStyle(src);
 }
 
 /**
@@ -39,16 +93,7 @@ export function saveMobjectStateImpl(mob: MobjectLike): void {
   mob.savedState = mob.copy();
 
   // Also store a plain-object snapshot for JSON serialization
-  mob.__savedMobjectState = {
-    position: [mob.position.x, mob.position.y, mob.position.z],
-    rotation: [mob.rotation.x, mob.rotation.y, mob.rotation.z, mob.rotation.order],
-    scale: [mob.scaleVector.x, mob.scaleVector.y, mob.scaleVector.z],
-    color: mob.color,
-    opacity: mob.opacity,
-    strokeWidth: mob.strokeWidth,
-    fillOpacity: mob.fillOpacity,
-    style: { ...asInternal(mob)._style },
-  };
+  mob.__savedMobjectState = serializeMobjectState(mob);
 }
 
 /**

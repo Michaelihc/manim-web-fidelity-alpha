@@ -35,6 +35,14 @@ export interface MobjectState {
   /** Scale [x, y, z] */
   scale: [number, number, number];
 
+  /**
+   * Painter-order layer.
+   *
+   * Optional only so snapshots produced before z-index serialization was
+   * introduced remain loadable. Newly serialized states always include it.
+   */
+  zIndex?: number;
+
   /** CSS color string */
   color: string;
 
@@ -87,6 +95,32 @@ export interface SceneSnapshot {
 // ---------------------------------------------------------------------------
 
 /**
+ * Capture the authoritative live paint channels.
+ *
+ * A few self-building constructors historically assigned `_color`,
+ * `fillOpacity`, or `strokeWidth` directly, so their cached style can still
+ * contain the base white/default values. `color` is the renderer-facing stroke
+ * color; preserve an independently configured fill unless both cached colors
+ * are the same stale constructor default.
+ */
+function captureLiveStyle(mob: Mobject): MobjectStyle {
+  const style = mob.style;
+  const cachedColorsAreStale =
+    style.strokeColor !== undefined &&
+    style.fillColor === style.strokeColor &&
+    style.strokeColor !== mob.color;
+
+  return {
+    ...style,
+    fillColor: cachedColorsAreStale ? mob.color : (mob.fillColor ?? mob.color),
+    strokeColor: mob.color,
+    fillOpacity: mob.fillOpacity,
+    strokeOpacity: mob.opacity,
+    strokeWidth: mob.strokeWidth,
+  };
+}
+
+/**
  * Capture a JSON-serializable snapshot of a mobject and its hierarchy.
  * Non-destructive: does not modify the mobject in any way.
  *
@@ -99,11 +133,12 @@ export function serializeMobject(mob: Mobject): MobjectState {
     position: [mob.position.x, mob.position.y, mob.position.z],
     rotation: [mob.rotation.x, mob.rotation.y, mob.rotation.z, mob.rotation.order],
     scale: [mob.scaleVector.x, mob.scaleVector.y, mob.scaleVector.z],
+    zIndex: mob.zIndex,
     color: mob.color,
     opacity: mob.opacity,
     strokeWidth: mob.strokeWidth,
     fillOpacity: mob.fillOpacity,
-    style: { ...mob.style },
+    style: captureLiveStyle(mob),
     children: [],
   };
 
@@ -146,14 +181,23 @@ export function deserializeMobject(mob: Mobject, state: MobjectState): void {
   // Scale
   mob.scaleVector.set(state.scale[0], state.scale[1], state.scale[2]);
 
-  // Visual properties
-  mob.color = state.color;
-  mob.setStrokeOpacity(state.opacity);
-  mob.strokeWidth = state.strokeWidth;
-  mob.fillOpacity = state.fillOpacity;
+  // Painter order. Leave the live value unchanged for legacy snapshots that
+  // predate z-index serialization.
+  if (state.zIndex !== undefined) {
+    mob.zIndex = state.zIndex;
+  }
 
-  // Style
+  // Colors/style first, then the duplicated scalar channels. Some older
+  // constructors assigned fillOpacity/strokeWidth directly, leaving those
+  // entries stale in `style`; the dedicated fields are authoritative.
+  mob.color = state.color;
   mob.setStyle(state.style);
+  // Restore the separately serialized semantic stroke last so even legacy
+  // snapshots with stale style colors cannot silently replace it.
+  mob.strokeColor = state.color;
+  mob.setStrokeOpacity(state.opacity);
+  mob.setStrokeWidth(state.strokeWidth);
+  mob.setFillOpacity(state.fillOpacity);
 
   // VMobject-specific
   if (mob instanceof VMobject) {

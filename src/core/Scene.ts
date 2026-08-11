@@ -14,6 +14,16 @@ import { ensureAnimateProxyRegistered } from './AnimateProxy';
 import type { MultiCamera } from './CameraExtensions';
 import { logger } from '../utils/logger';
 
+const TWO_D_MATERIAL_STATE = Symbol('manimWeb2DMaterialState');
+
+type MaterialWith2DState = THREE.Material & {
+  [TWO_D_MATERIAL_STATE]?: {
+    transparent: boolean;
+    depthTest: boolean;
+    depthWrite: boolean;
+  };
+};
+
 // AnimateProxy self-registers with Mobject via a top-level side effect
 // (see AnimateProxy.ts) to avoid the Mobject -> AnimateProxy -> Transform ->
 // VGroup -> Mobject cycle. Touching the export here forces module evaluation
@@ -113,6 +123,8 @@ export class Scene {
 
   // Performance optimization: auto-render control
   protected _autoRender: boolean = true;
+  /** Nesting depth for synchronous or async batch transactions. */
+  private _batchDepth: number = 0;
 
   // Deferred auto-render: `add()` schedules a render via microtask instead of
   // rendering eagerly, so a subsequent `play()` can suppress it and avoid a
@@ -122,8 +134,9 @@ export class Scene {
   // Set by `play()`/`wait()` during their setup phase.
   private _suppressAutoRender: boolean = false;
 
-  // Z-ordering: assign increasing renderOrder to each added mobject
-  private _renderOrderCounter: number = 0;
+  // Foreground membership is tracked explicitly so z-index sorting never
+  // relies on a magic renderOrder range.
+  private _foregroundMobjects: Set<Mobject> = new Set();
 
   // State management (undo/redo)
   private _stateManager: SceneStateManager;
@@ -309,6 +322,26 @@ export class Scene {
    */
   setTimeline(timeline: Timeline | null): void {
     this._timeline = timeline;
+    timeline?._attachScene(this, {
+      isForeground: (mobject) => this._foregroundMobjects.has(mobject),
+      restoreForeground: (mobject, foreground) => {
+        if (!this._mobjects.has(mobject)) return;
+        if (foreground) {
+          this._foregroundMobjects.add(mobject);
+        } else {
+          this._foregroundMobjects.delete(mobject);
+        }
+      },
+      restoreInitialRootOrder: (initialRoots) => {
+        const initialRootSet = new Set(initialRoots);
+        const restoredOrder = [
+          ...initialRoots.filter((mobject) => this._mobjects.has(mobject)),
+          ...[...this._mobjects].filter((mobject) => !initialRootSet.has(mobject)),
+        ];
+        this._mobjects = new Set(restoredOrder);
+        this._refresh2DPainterOrdering();
+      },
+    });
   }
 
   /**
@@ -408,6 +441,135 @@ export class Scene {
   }
 
   /**
+   * Whether this scene uses Manim's 2D painter ordering. ThreeDScene overrides
+   * this so Three.js can retain camera/depth sorting.
+   */
+  protected get _uses2DPainterOrdering(): boolean {
+    return true;
+  }
+
+  private static _normalizeMaterialFor2D(material: THREE.Material): void {
+    const tracked = material as MaterialWith2DState;
+    tracked[TWO_D_MATERIAL_STATE] ??= {
+      transparent: material.transparent,
+      depthTest: material.depthTest,
+      depthWrite: material.depthWrite,
+    };
+
+    if (!material.transparent) {
+      material.transparent = true;
+      material.needsUpdate = true;
+    }
+    material.depthTest = false;
+    material.depthWrite = false;
+  }
+
+  /**
+   * Restore material flags captured before 2D painter normalization.
+   * Used by ThreeDScene before it reapplies camera/depth-based settings.
+   */
+  protected static _restoreMaterialAfter2D(material: THREE.Material): void {
+    const tracked = material as MaterialWith2DState;
+    const state = tracked[TWO_D_MATERIAL_STATE];
+    if (!state) return;
+
+    if (material.transparent !== state.transparent) material.needsUpdate = true;
+    material.transparent = state.transparent;
+    material.depthTest = state.depthTest;
+    material.depthWrite = state.depthWrite;
+    delete tracked[TWO_D_MATERIAL_STATE];
+  }
+
+  /**
+   * Recompute dense render ranks for the complete scene family.
+   *
+   * Ordering is stable by foreground band, z-index, then scene insertion and
+   * child preorder. Each mobject owns only the render nodes below its backing
+   * object up to (but not including) child-mobject backing roots.
+   */
+  private _refresh2DPainterOrdering(): void {
+    if (!this._uses2DPainterOrdering) return;
+
+    interface RenderEntry {
+      mobject: Mobject;
+      foreground: boolean;
+      ordinal: number;
+    }
+
+    const entries = new Map<Mobject, RenderEntry>();
+    let nextOrdinal = 0;
+
+    const visit = (mobject: Mobject, inheritedForeground: boolean): void => {
+      const foreground = inheritedForeground || this._foregroundMobjects.has(mobject);
+      const existing = entries.get(mobject);
+
+      if (existing) {
+        if (!foreground || existing.foreground) return;
+        existing.foreground = true;
+      } else {
+        entries.set(mobject, {
+          mobject,
+          foreground,
+          ordinal: nextOrdinal++,
+        });
+      }
+
+      for (const child of mobject.children) visit(child, foreground);
+    };
+
+    for (const mobject of this._mobjects) {
+      visit(mobject, this._foregroundMobjects.has(mobject));
+    }
+
+    const ordered = Array.from(entries.values()).sort((a, b) => {
+      if (a.foreground !== b.foreground) return a.foreground ? 1 : -1;
+      if (a.mobject.zIndex !== b.mobject.zIndex) {
+        return a.mobject.zIndex < b.mobject.zIndex ? -1 : 1;
+      }
+      return a.ordinal - b.ordinal;
+    });
+
+    ordered.forEach(({ mobject }, rank) => this._apply2DRenderState(mobject, rank));
+  }
+
+  /**
+   * Apply one owner's dense rank and 2D material settings without crossing
+   * into child-mobject roots, which receive their own ranks separately.
+   */
+  private _apply2DRenderState(mobject: Mobject, rank: number): void {
+    const root = mobject.getThreeObject();
+    const childRoots = new Set<THREE.Object3D>();
+    for (const child of mobject.children) {
+      if (child._threeObject) childRoots.add(child._threeObject);
+    }
+
+    const apply = (object: THREE.Object3D, isRoot: boolean): void => {
+      if (!isRoot && childRoots.has(object)) return;
+
+      const material = (
+        object as THREE.Object3D & {
+          material?: THREE.Material | THREE.Material[];
+        }
+      ).material;
+      if (material) {
+        object.renderOrder = rank;
+        for (const item of Array.isArray(material) ? material : [material]) {
+          Scene._normalizeMaterialFor2D(item);
+        }
+      } else {
+        // THREE.Group.renderOrder becomes `groupOrder`, which is compared
+        // before leaf renderOrder. Leaving a container ranked would trap all
+        // child-mobject renderables in the parent's band and defeat child z.
+        object.renderOrder = 0;
+      }
+
+      for (const child of object.children) apply(child, false);
+    };
+
+    apply(root, true);
+  }
+
+  /**
    * Add mobjects as foreground objects that render on top of everything.
    * Matches Manim Python's add_foreground_mobject().
    * @param mobjects - Mobjects to add in the foreground
@@ -417,14 +579,10 @@ export class Scene {
       if (!this._mobjects.has(mobject)) {
         this.add(mobject);
       }
-      // Set very high renderOrder so it draws on top
-      const threeObj = mobject.getThreeObject();
-      const fgRo = 10000 + this._renderOrderCounter++;
-      threeObj.renderOrder = fgRo;
-      threeObj.traverse((child) => {
-        child.renderOrder = fgRo;
-      });
+      this._foregroundMobjects.add(mobject);
+      mobject.getThreeObject();
     }
+    this._refresh2DPainterOrdering();
     // Deferred render so a chained `play()` can suppress it (issue #317).
     this._scheduleRender();
     return this;
@@ -439,22 +597,6 @@ export class Scene {
       if (!this._mobjects.has(mobject)) {
         this._mobjects.add(mobject);
         const threeObj = mobject.getThreeObject();
-        const ro = this._renderOrderCounter++;
-        threeObj.renderOrder = ro;
-        // Propagate renderOrder to ALL children so THREE.js sorts meshes
-        // correctly (Group renderOrder doesn't cascade to child meshes).
-        // Also disable depth test so renderOrder controls draw order (2D scene).
-        threeObj.traverse((child) => {
-          child.renderOrder = ro;
-          const mesh = child as THREE.Mesh;
-          if (mesh.material) {
-            if (Array.isArray(mesh.material)) {
-              for (const m of mesh.material) m.depthTest = false;
-            } else {
-              mesh.material.depthTest = false;
-            }
-          }
-        });
         // Only add to THREE scene root if not already in the scene graph
         // (prevents reparenting sub-objects like ZoomedDisplay.displayFrame)
         if (!this._isInSceneGraph(threeObj)) {
@@ -466,9 +608,12 @@ export class Scene {
         // re-render when done. Recursively check children since MathTex objects
         // may be nested inside VGroup/Group containers.
         this._awaitAsyncRenders(mobject);
-        mobject.createdAtBeginning = true;
+        for (const member of mobject.getFamily()) {
+          member.createdAtBeginning = true;
+        }
       }
     }
+    this._refresh2DPainterOrdering();
     // Defer the auto-render via microtask so a chained `play()` can suppress
     // it and avoid a one-frame flash of the pre-animation state (issue #317).
     this._scheduleRender();
@@ -483,6 +628,7 @@ export class Scene {
     for (const mobject of mobjects) {
       if (this._mobjects.has(mobject)) {
         this._mobjects.delete(mobject);
+        this._foregroundMobjects.delete(mobject);
         const threeObj = mobject.getThreeObject();
         // Only remove from THREE scene root if it's a direct child
         // (sub-objects stay with their parent group)
@@ -491,6 +637,7 @@ export class Scene {
         }
       }
     }
+    this._refresh2DPainterOrdering();
     if (this._autoRender) {
       this._render();
     }
@@ -537,7 +684,7 @@ export class Scene {
       mobject.dispose();
     }
     this._mobjects.clear();
-    this._renderOrderCounter = 0;
+    this._foregroundMobjects.clear();
 
     // Also remove any untracked Three.js objects (e.g., cross-fade targets
     // added directly by Transform animations)
@@ -573,9 +720,18 @@ export class Scene {
    */
   private async _runAnimations(
     topLevelAnimations: Animation[],
-    scheduleOnTimeline: (timeline: Timeline) => void,
+    scheduleOnTimeline: (timeline: Timeline, segmentStart: number) => void,
   ): Promise<void> {
     const allAnimations = this._collectAllAnimations(topLevelAnimations);
+    const timeline = this._timeline ?? new Timeline();
+    this.setTimeline(timeline);
+    const segmentStart = timeline.getDuration();
+
+    // If user code scrubbed into the existing history, restore its final
+    // state before new animations snapshot their starting values in begin().
+    if (timeline.getCurrentTime() !== segmentStart) {
+      timeline.seek(segmentStart);
+    }
 
     // Suppress any auto-render that `add()` (called by the user before play,
     // or by us below) might have scheduled. Otherwise the mobject would be
@@ -584,9 +740,20 @@ export class Scene {
     this._cancelPendingRender();
     this._suppressAutoRender = true;
     try {
+      const readinessMobjects = new Set<Mobject>();
+      for (const animation of topLevelAnimations) {
+        const participatingMobjects =
+          typeof animation.getAllMobjects === 'function'
+            ? animation.getAllMobjects()
+            : [animation.mobject];
+        for (const mobject of participatingMobjects) {
+          readinessMobjects.add(mobject);
+        }
+      }
+
       // Wait for any async renders (e.g. SVG-based MathTex) to complete before
-      // starting animations. Without this, Create/DrawBorderThenFill would
-      // animate an empty mobject because SVG paths haven't loaded yet.
+      // starting animations. Include transform targets as well as live source
+      // mobjects, but do not add those targets independently to the scene.
       const renderPromises: Promise<void>[] = [];
       const collectRenders = (mobject: Mobject) => {
         const asyncMob = mobject as Mobject & { waitForRender?: () => Promise<void> };
@@ -597,8 +764,8 @@ export class Scene {
           collectRenders(child);
         }
       };
-      for (const anim of allAnimations) {
-        collectRenders(anim.mobject);
+      for (const mobject of readinessMobjects) {
+        collectRenders(mobject);
       }
       if (renderPromises.length > 0) {
         await Promise.all(renderPromises);
@@ -608,10 +775,10 @@ export class Scene {
       // animations (e.g. MathTex Create). This must happen before begin() but
       // we must NOT add to the scene yet — otherwise the mobject renders at full
       // opacity for one frame before begin() hides it.
-      for (const animation of allAnimations) {
-        if (animation.mobject._dirty) {
-          animation.mobject._syncToThree();
-          animation.mobject._dirty = false;
+      for (const mobject of readinessMobjects) {
+        if (mobject._dirty) {
+          mobject._syncToThree();
+          mobject._dirty = false;
         }
       }
 
@@ -623,23 +790,34 @@ export class Scene {
       // Add animated mobjects to scene AFTER begin() so they appear in their
       // initial animation state (e.g. hidden for Create, zero opacity for FadeIn).
       for (const animation of allAnimations) {
+        if (animation instanceof AnimationGroup) continue;
         if (!this._mobjects.has(animation.mobject)) {
           this.add(animation.mobject);
         }
       }
 
-      // Schedule animations on timeline via callback
-      this._timeline = new Timeline();
-      scheduleOnTimeline(this._timeline);
+      // Keep one cumulative timeline for the lifetime of the scene.  A fresh
+      // timeline per play() made earlier animations impossible to seek or
+      // export once a later play() had completed.
+      scheduleOnTimeline(timeline, segmentStart);
+      timeline._addSceneMembershipEvent(topLevelAnimations, segmentStart, timeline.getDuration());
+      this._timeline = timeline;
+
+      // A caller may have seeked into the existing history before appending a
+      // new play. Playback of the appended segment always starts at the old
+      // timeline end, while the full history remains available for seeking.
+      if (timeline.getCurrentTime() !== segmentStart) {
+        timeline.seek(segmentStart);
+      }
 
       // Start playback
-      this._timeline.play();
+      timeline.play();
       this._isPlaying = true;
-      this._currentTime = 0;
+      this._currentTime = segmentStart;
 
       // Start audio playback if audio has been loaded
       if (this._audioManager) {
-        this._audioManager.seek(0);
+        this._audioManager.seek(segmentStart);
         this._audioManager.play();
       }
 
@@ -657,12 +835,6 @@ export class Scene {
     await new Promise<void>((resolve) => {
       this._playPromiseResolve = resolve;
     });
-
-    // Let each animation update scene membership (handles `remover`,
-    // and overrides like ReplacementTransform that swap source for target).
-    for (const animation of allAnimations) {
-      animation.cleanUpFromScene(this);
-    }
   }
 
   /**
@@ -675,8 +847,8 @@ export class Scene {
   async play(...animations: Animation[]): Promise<void> {
     if (animations.length === 0) return;
 
-    return this._runAnimations(animations, (timeline) => {
-      timeline.addParallel(animations);
+    return this._runAnimations(animations, (timeline, segmentStart) => {
+      timeline.addParallel(animations, segmentStart);
     });
   }
 
@@ -726,9 +898,9 @@ export class Scene {
 
     const animations = entries.map((e) => e.animation);
 
-    return this._runAnimations(animations, (timeline) => {
+    return this._runAnimations(animations, (timeline, segmentStart) => {
       for (const { animation, start } of entries) {
-        timeline.add(animation, start);
+        timeline.add(animation, segmentStart + start);
       }
     });
   }
@@ -751,6 +923,21 @@ export class Scene {
    */
   async wait(duration: number = 1): Promise<void> {
     if (this._disposed) return;
+    const waitDuration = Number.isNaN(duration) ? 0 : Math.max(0, duration);
+    const timeline = this._timeline ?? new Timeline();
+    const segmentStart = timeline.getDuration();
+    const segmentEnd = segmentStart + waitDuration;
+
+    // A regular Scene builds one cumulative timeline across play() and wait().
+    // The hold has no animation of its own; seeking anywhere inside it keeps
+    // the visual state reached at segmentStart.
+    if (!this._isPlaying && timeline.getCurrentTime() !== segmentStart) {
+      timeline.seek(segmentStart);
+    }
+    timeline.addWait(waitDuration, segmentStart);
+    this._timeline = timeline;
+    this._currentTime = timeline.getCurrentTime();
+
     // wait() will render the initial frame itself (either once or via its
     // own rAF loop); drop any pending add()-scheduled render so we don't
     // render twice on entry.
@@ -770,6 +957,10 @@ export class Scene {
         // Remove from active cleanups
         const idx = this._waitCleanups.indexOf(cleanup);
         if (idx >= 0) this._waitCleanups.splice(idx, 1);
+        if (!this._disposed && this._timeline === timeline && !this._isPlaying) {
+          timeline.seek(segmentEnd);
+          this._currentTime = timeline.getCurrentTime();
+        }
         resolve();
       };
 
@@ -781,13 +972,13 @@ export class Scene {
       // running 60fps GPU rendering when the scene is static.
       if (!this._needsPerFrameRendering()) {
         this._render();
-        if (duration > 86400) {
+        if (waitDuration > 86400) {
           // "Forever" wait (e.g. wait(999999)) — resolve only on dispose
           return;
         }
         timerId = setTimeout(() => {
           cleanup();
-        }, duration * 1000) as unknown as ReturnType<typeof setInterval>;
+        }, waitDuration * 1000) as unknown as ReturnType<typeof setInterval>;
         return;
       }
 
@@ -797,7 +988,7 @@ export class Scene {
           return;
         }
         const elapsed = (currentTime - startTime) / 1000;
-        if (elapsed >= duration) {
+        if (elapsed >= waitDuration) {
           // Final update at exactly the remaining dt
           const dt = (currentTime - lastFrameTime) / 1000;
           if (dt > 0) {
@@ -853,7 +1044,7 @@ export class Scene {
   seek(time: number): this {
     if (this._timeline) {
       this._timeline.seek(time);
-      this._currentTime = time;
+      this._currentTime = this._timeline.getCurrentTime();
       this._render();
     }
     if (this._audioManager) {
@@ -992,6 +1183,7 @@ export class Scene {
 
     // Sync only dirty mobjects (dirty flag optimization)
     this._syncDirtyMobjects();
+    this._refresh2DPainterOrdering();
 
     // Update frustum for culling if enabled
     if (this._frustumCulling) {
@@ -1242,16 +1434,42 @@ export class Scene {
    * });
    * ```
    */
-  batch(callback: () => void): void {
+  batch<T>(callback: () => T): T {
+    const isOuterBatch = this._batchDepth === 0;
     const wasAutoRender = this._autoRender;
-    this._autoRender = false;
-    try {
-      callback();
-    } finally {
+    if (isOuterBatch) {
+      this._autoRender = false;
+      this._cancelPendingRender();
+    }
+    this._batchDepth += 1;
+
+    const finish = (): void => {
+      this._batchDepth -= 1;
+      if (!isOuterBatch) return;
       this._autoRender = wasAutoRender;
       this._syncDirtyMobjects();
       this._render();
+    };
+
+    let result: T;
+    try {
+      result = callback();
+    } catch (error) {
+      finish();
+      throw error;
     }
+
+    if (
+      result !== null &&
+      (typeof result === 'object' || typeof result === 'function') &&
+      'then' in result &&
+      typeof result.then === 'function'
+    ) {
+      return Promise.resolve(result).finally(finish) as T;
+    }
+
+    finish();
+    return result;
   }
 
   /**

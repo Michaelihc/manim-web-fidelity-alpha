@@ -12,6 +12,7 @@ permissions:
 jobs:
   release:
     name: Tag & Release
+    if: ${{ github.repository == 'maloyan/manim-web' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

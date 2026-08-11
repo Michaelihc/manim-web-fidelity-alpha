@@ -60,6 +60,7 @@ function lerpPointData(start: PointData, target: PointData, alpha: number): Poin
 }
 
 export class PointCloudMorphStrategy implements MorphStrategy {
+  private _originalStartPoints: PointData[] = [];
   private _startPoints: PointData[] = [];
   private _targetPoints: PointData[] = [];
   private _finalTargetPoints: PointData[] = [];
@@ -73,6 +74,8 @@ export class PointCloudMorphStrategy implements MorphStrategy {
   begin(_animation: Animation, source: Mobject, target: Mobject): void {
     if (!(source instanceof PMobject) || !(target instanceof PMobject))
       throw new Error('PointCloudMorphStrategy requires PMobject inputs');
+
+    this._originalStartPoints = source.getLocalPoints().map(clonePoint);
 
     // Target's real final geometry, captured before any padding.
     this._finalTargetPoints = target.getLocalPoints().map(clonePoint);
@@ -117,6 +120,16 @@ export class PointCloudMorphStrategy implements MorphStrategy {
     pmob.position.copy(this._targetPosition);
     pmob.rotation.copy(this._targetRotation);
     pmob.scaleVector.copy(this._targetScale);
+    pmob._markDirty();
+  }
+
+  reset(_animation: Animation, source: Mobject, _target: Mobject): void {
+    const pmob = source as PMobject;
+    pmob.clearPoints();
+    pmob.addPoints(this._originalStartPoints);
+    pmob.position.copy(this._startPosition);
+    pmob.rotation.copy(this._startRotation);
+    pmob.scaleVector.copy(this._startScale);
     pmob._markDirty();
   }
 }

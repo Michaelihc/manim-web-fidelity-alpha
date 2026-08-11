@@ -1,6 +1,7 @@
 import { VMobject } from '../../core/VMobject';
 import { Vector3Tuple } from '../../core/Mobject';
 import { BLUE, DEFAULT_STROKE_WIDTH } from '../../constants';
+import { ArrowTriangleFilledTip } from './ArrowTips';
 
 /**
  * Options for creating a CurvedArrow
@@ -53,6 +54,7 @@ export class CurvedArrow extends VMobject {
   private _tipLength: number;
   private _tipWidth: number;
   private _numComponents: number;
+  private _tip: ArrowTriangleFilledTip | null = null;
 
   constructor(options: CurvedArrowOptions = {}) {
     super();
@@ -76,8 +78,11 @@ export class CurvedArrow extends VMobject {
     this._numComponents = numComponents;
 
     this.color = color;
-    this.fillOpacity = 1; // Fill the arrowhead
-    this.strokeWidth = strokeWidth;
+    // The shaft is an open curve. Keeping it unfilled is essential: combining
+    // it with the filled tip in one path makes the fill triangulator close the
+    // entire arc with a chord, producing a giant wedge.
+    this.setFillOpacity(0);
+    this.setStrokeWidth(strokeWidth);
 
     this._generatePoints();
   }
@@ -86,6 +91,12 @@ export class CurvedArrow extends VMobject {
    * Generate the curved arrow points.
    */
   private _generatePoints(): void {
+    const previousTipFillOpacity = this._tip?.fillOpacity ?? 1;
+    if (this._tip) {
+      this.remove(this._tip);
+      this._tip = null;
+    }
+
     const points: number[][] = [];
 
     // Calculate arc parameters
@@ -105,17 +116,18 @@ export class CurvedArrow extends VMobject {
     }
 
     const halfAngle = Math.abs(this._angle) / 2;
+    if (halfAngle < 1e-10) {
+      this._generateStraightPoints(midZ, previousTipFillOpacity);
+      return;
+    }
+
     const radius = halfChord / Math.sin(halfAngle);
     const distToCenter = radius * Math.cos(halfAngle);
 
     const chordLength = 2 * halfChord;
-    let perpX = -chordY / chordLength;
-    let perpY = chordX / chordLength;
-
-    if (this._angle > 0) {
-      perpX = -perpX;
-      perpY = -perpY;
-    }
+    const directionSign = Math.sign(this._angle) || 1;
+    const perpX = (-chordY / chordLength) * directionSign;
+    const perpY = (chordX / chordLength) * directionSign;
 
     const centerX = midX + distToCenter * perpX;
     const centerY = midY + distToCenter * perpY;
@@ -124,8 +136,8 @@ export class CurvedArrow extends VMobject {
     // Calculate where to end the arc (before the tip)
     // We need to find the point on the arc that is tipLength away from the end
     const arcLength = Math.abs(radius * this._angle);
-    const shortenedArcLength = arcLength - this._tipLength;
-    const shortenedAngle = (this._angle > 0 ? 1 : -1) * (shortenedArcLength / radius);
+    const shortenedArcLength = Math.max(0, arcLength - Math.max(0, this._tipLength));
+    const shortenedAngle = directionSign * (shortenedArcLength / radius);
 
     // Generate arc points for the shaft
     const numSegments = Math.max(
@@ -167,41 +179,84 @@ export class CurvedArrow extends VMobject {
     const tipBaseX = centerX + radius * Math.cos(tipBaseAngle);
     const tipBaseY = centerY + radius * Math.sin(tipBaseAngle);
 
-    // Direction at the tip (tangent to the arc)
-    const endAngleOnArc = startAngle + this._angle;
-    const dirX = this._angle > 0 ? -Math.sin(endAngleOnArc) : Math.sin(endAngleOnArc);
-    const dirY = this._angle > 0 ? Math.cos(endAngleOnArc) : -Math.cos(endAngleOnArc);
-    const dirLen = Math.sqrt(dirX * dirX + dirY * dirY);
-    const normDirX = dirX / dirLen;
-    const normDirY = dirY / dirLen;
-
-    // Perpendicular to direction
-    const tipPerpX = -normDirY;
-    const tipPerpY = normDirX;
-
-    // Tip corners
-    const tipLeftX = tipBaseX + tipPerpX * this._tipWidth;
-    const tipLeftY = tipBaseY + tipPerpY * this._tipWidth;
-    const tipRightX = tipBaseX - tipPerpX * this._tipWidth;
-    const tipRightY = tipBaseY - tipPerpY * this._tipWidth;
-
-    // Add arrowhead as line segments
-    const addLineSegment = (p0: number[], p1: number[]) => {
-      const dx = p1[0] - p0[0];
-      const dy = p1[1] - p0[1];
-      const dz = p1[2] - p0[2];
-      points.push([p0[0] + dx / 3, p0[1] + dy / 3, p0[2] + dz / 3]);
-      points.push([p0[0] + (2 * dx) / 3, p0[1] + (2 * dy) / 3, p0[2] + (2 * dz) / 3]);
-      points.push([...p1]);
-    };
-
-    // Tip: tipBase -> tipLeft -> end -> tipRight -> tipBase
-    addLineSegment([tipBaseX, tipBaseY, midZ], [tipLeftX, tipLeftY, midZ]);
-    addLineSegment([tipLeftX, tipLeftY, midZ], [end[0], end[1], midZ]);
-    addLineSegment([end[0], end[1], midZ], [tipRightX, tipRightY, midZ]);
-    addLineSegment([tipRightX, tipRightY, midZ], [tipBaseX, tipBaseY, midZ]);
-
     this.setPoints3D(points);
+    this._addTip([end[0], end[1], midZ], [tipBaseX, tipBaseY, midZ], previousTipFillOpacity);
+  }
+
+  /**
+   * Degenerate zero-angle case: render a straight, tip-trimmed shaft instead
+   * of letting the circle construction divide by sin(0).
+   */
+  private _generateStraightPoints(midZ: number, tipFillOpacity: number): void {
+    const start = this._startPoint;
+    const end = this._endPoint;
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const length = Math.sqrt(dx * dx + dy * dy);
+    const dirX = dx / length;
+    const dirY = dy / length;
+    const tipLength = Math.min(Math.max(0, this._tipLength), length);
+    const base: Vector3Tuple = [end[0] - dirX * tipLength, end[1] - dirY * tipLength, midZ];
+    const shaftStart: Vector3Tuple = [start[0], start[1], midZ];
+
+    this.setPoints3D([
+      shaftStart,
+      [
+        shaftStart[0] + (base[0] - shaftStart[0]) / 3,
+        shaftStart[1] + (base[1] - shaftStart[1]) / 3,
+        midZ,
+      ],
+      [
+        shaftStart[0] + (2 * (base[0] - shaftStart[0])) / 3,
+        shaftStart[1] + (2 * (base[1] - shaftStart[1])) / 3,
+        midZ,
+      ],
+      base,
+    ]);
+    this._addTip([end[0], end[1], midZ], base, tipFillOpacity);
+  }
+
+  /**
+   * Add the filled arrowhead as an independent VMobject. Its base is anchored
+   * to the shaft endpoint.
+   */
+  private _addTip(apex: Vector3Tuple, base: Vector3Tuple, fillOpacity: number): void {
+    const dx = apex[0] - base[0];
+    const dy = apex[1] - base[1];
+    const dz = apex[2] - base[2];
+    const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (length < 1e-10 || this._tipWidth <= 0) return;
+
+    this._tip = new ArrowTriangleFilledTip({
+      position: apex,
+      direction: [dx, dy, dz],
+      length,
+      width: this._tipWidth,
+      color: this.color,
+      strokeWidth: 0,
+      fillOpacity,
+    });
+    this.add(this._tip);
+  }
+
+  /**
+   * A CurvedArrow is now a compound VMobject. Preserve the single-object color
+   * behavior by recoloring the independently rendered tip as well.
+   */
+  override setColor(color: string): this {
+    super.setColor(color);
+    this._tip?.setColor(color);
+    return this;
+  }
+
+  /**
+   * Fill applies only to the closed arrowhead. The open shaft must remain
+   * unfilled even when generic opacity/style helpers target the whole arrow.
+   */
+  override setFillOpacity(opacity: number): this {
+    super.setFillOpacity(0);
+    this._tip?.setFillOpacity(opacity);
+    return this;
   }
 
   /**
@@ -281,6 +336,7 @@ export class CurvedArrow extends VMobject {
       strokeWidth: this.strokeWidth,
     });
     this._copyBaseAttributesInto(clone, { copyChildren: false, copyPosition: false });
+    if (this._tip && clone._tip) clone._tip.setFillOpacity(this._tip.fillOpacity);
     return clone;
   }
 }

@@ -1,19 +1,25 @@
 /**
- * Create animation - draws the mobject stroke progressively.
- * For VMobjects, this uses dashed lines to progressively reveal the stroke path,
- * similar to how Manim's Create animation works.
+ * Create animation - progressively slices the mobject's cubic Bézier geometry.
+ * Compound VMobject contours stay disconnected; raster/text fallbacks retain
+ * their renderer-specific reveal paths.
  */
 
 import * as THREE from 'three';
 import { Mobject } from '../../core/Mobject';
-import { Group } from '../../core/Group';
 import { VMobject } from '../../core/VMobject';
-import { VGroup } from '../../core/VGroup';
 import { Animation, AnimationOptions } from '../Animation';
 import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { TextGlyphGroup } from '../../mobjects/text/TextGlyphGroup';
 import type { GlyphVMobject } from '../../mobjects/text/GlyphVMobject';
+import { doubleSmooth, linear } from '../../rate-functions';
+import { VectorPathReveal } from './VectorPathReveal';
+import {
+  applyPaintOpacityFactor,
+  capturePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from '../transform/PaintOpacity';
 
 /**
  * Interface for mobjects that support glyph-stroke animation (e.g. Text).
@@ -65,7 +71,7 @@ export function getLine2TotalLength(child: Line2): number {
 
 /**
  * Check whether a mobject's Three.js subtree contains at least one Line2 child.
- * Used by Create-family animations to decide between dash-based reveal and opacity fallback.
+ * Used by legacy raster-glyph and Uncreate fallbacks.
  */
 export function hasLine2Children(mobject: Mobject): boolean {
   let found = false;
@@ -76,197 +82,69 @@ export function hasLine2Children(mobject: Mobject): boolean {
 }
 
 export interface CreateOptions extends AnimationOptions {
-  /** Stagger ratio between submobjects (0 = simultaneous, higher = more stagger). Default: 0 */
+  /** Stagger ratio between point-bearing family members. Default: 1 */
   lagRatio?: number;
 }
 
 export class Create extends Animation {
-  /** Whether to use dash-based reveal (needs Line2 children) */
-  private _useDashReveal: boolean = false;
-  /** Whether the mobject has fill that needs to be animated */
-  private _hasFill: boolean = false;
-  /** Original fill opacity to restore */
-  private _originalFillOpacity: number = 0;
-  /** Lag ratio for staggered submobject animation */
-  private _lagRatio: number = 0;
-  /** Individual Line2 children for per-child stagger */
-  private _line2Children: Line2[] = [];
-  /** Per-Line2 total lengths */
-  private _line2TotalLengths: number[] = [];
-  /** Saved per-descendant opacities for proportional scaling (opacity fallback path) */
+  private readonly _vectorReveal: VectorPathReveal;
+  private _useVectorReveal: boolean = false;
   private _savedOpacities: Array<[Mobject, number]> = [];
 
   constructor(mobject: Mobject, options: CreateOptions = {}) {
-    // Manim default for Create is 2 seconds
-    super(mobject, { duration: options.duration ?? 2, ...options });
-    this._lagRatio = options.lagRatio ?? 0;
+    super(mobject, { ...options, duration: options.duration ?? 1 });
+    this._vectorReveal = new VectorPathReveal(mobject, {
+      lagRatio: options.lagRatio ?? 1,
+      rateFunc: this.rateFunc,
+      drawBorderThenFill: false,
+    });
   }
 
-  /**
-   * Set up the animation - configure dashed lines for progressive reveal.
-   * For filled VMobjects (like Polygon with fillOpacity > 0), this behaves
-   * like Manim's DrawBorderThenFill: first half draws the border, second
-   * half fades in the fill.
-   */
   override begin(): void {
     super.begin();
-
-    this._useDashReveal = this.mobject instanceof VMobject && hasLine2Children(this.mobject);
-
-    if (this._useDashReveal) {
-      const vmob = this.mobject as VMobject;
-
-      // Check if this VMobject has fill
-      this._originalFillOpacity = vmob.fillOpacity;
-      this._hasFill = this._originalFillOpacity > 0;
-
-      // Hide fill initially so it can fade in during second half
-      if (this._hasFill) {
-        vmob.setFillOpacity(0);
-      }
-
-      // Collect all Line2 children for per-child stagger support
-      this._line2Children = [];
-      this._line2TotalLengths = [];
-      const threeObj = this.mobject.getThreeObject();
-      threeObj.traverse((child) => {
-        if (child instanceof Line2) {
-          const material = child.material as LineMaterial;
-          material.dashed = true;
-          material.dashScale = 1;
-
-          child.computeLineDistances();
-          const totalLen = getLine2TotalLength(child);
-          this._line2Children.push(child);
-          this._line2TotalLengths.push(totalLen);
-
-          // Start with nothing visible
-          material.dashSize = 0;
-          material.gapSize = totalLen;
-          material.needsUpdate = true;
-        }
-      });
-    } else {
-      // Non-line mobject (Text, etc.): use opacity
-      // Save per-descendant opacities so children with different opacities
-      // (e.g. NumberPlane background lines with opacity 0) are preserved
+    this._useVectorReveal = this._vectorReveal.begin();
+    if (!this._useVectorReveal) {
       this._savedOpacities = [];
       this._collectOpacities(this.mobject);
       this.mobject.setStrokeOpacity(0);
     }
   }
 
-  /**
-   * Recursively collect original opacities of a mobject and all descendants.
-   */
   private _collectOpacities(mob: Mobject): void {
     this._savedOpacities.push([mob, mob.opacity]);
-    // VGroup is a VMobject (not a Group), but its setStrokeOpacity also
-    // propagates to children — so children must be saved/restored too,
-    // otherwise begin()'s setStrokeOpacity(0) zeroes them permanently.
-    if (mob instanceof Group || mob instanceof VGroup) {
-      for (const child of mob.children) {
-        this._collectOpacities(child);
-      }
-    }
+    for (const child of mob.children) this._collectOpacities(child);
   }
 
-  /**
-   * Apply proportionally scaled opacities to all saved descendants.
-   * Uses Mobject.prototype.setStrokeOpacity to avoid Group propagation.
-   */
   private _applyScaledOpacities(factor: number): void {
     for (const [mob, origOpacity] of this._savedOpacities) {
       Mobject.prototype.setStrokeOpacity.call(mob, origOpacity * factor);
     }
   }
 
-  /**
-   * Interpolate the dash size to progressively reveal the stroke.
-   * For filled VMobjects: first half draws border, second half fades in fill.
-   */
-  /**
-   * Compute per-child alpha with lag stagger.
-   * With lagRatio=0, all children animate together.
-   * With lagRatio>0, each child starts slightly after the previous.
-   */
-  private _childAlpha(alpha: number, childIndex: number, totalChildren: number): number {
-    if (this._lagRatio <= 0 || totalChildren <= 1) return alpha;
-    const fullLength = (totalChildren - 1) * this._lagRatio + 1;
-    const value = alpha * fullLength;
-    const lower = childIndex * this._lagRatio;
-    return Math.max(0, Math.min(1, value - lower));
-  }
-
   interpolate(alpha: number): void {
-    if (this._useDashReveal) {
-      const n = this._line2Children.length;
-
-      if (this._hasFill) {
-        // Two-phase animation: border then fill (like Manim's DrawBorderThenFill)
-        const vmob = this.mobject as VMobject;
-        if (alpha < 0.5) {
-          vmob.setFillOpacity(0);
-          const strokeAlpha = alpha * 2;
-          for (let i = 0; i < n; i++) {
-            const cAlpha = this._childAlpha(strokeAlpha, i, n);
-            const totalLen = this._line2TotalLengths[i];
-            const material = this._line2Children[i].material as LineMaterial;
-            const visibleLength = cAlpha * totalLen;
-            material.dashSize = visibleLength;
-            material.gapSize = totalLen - visibleLength + 0.0001;
-            material.needsUpdate = true;
-          }
-        } else {
-          const fillAlpha = (alpha - 0.5) * 2;
-          vmob.setFillOpacity(this._originalFillOpacity * fillAlpha);
-          for (let i = 0; i < n; i++) {
-            const totalLen = this._line2TotalLengths[i];
-            const material = this._line2Children[i].material as LineMaterial;
-            if (material.dashed) {
-              material.dashSize = totalLen;
-              material.gapSize = 0.0001;
-              material.needsUpdate = true;
-            }
-          }
-        }
-      } else {
-        // No fill: stroke reveal with per-child stagger
-        for (let i = 0; i < n; i++) {
-          const cAlpha = this._childAlpha(alpha, i, n);
-          const totalLen = this._line2TotalLengths[i];
-          const material = this._line2Children[i].material as LineMaterial;
-          const visibleLength = cAlpha * totalLen;
-          material.dashSize = visibleLength;
-          material.gapSize = totalLen - visibleLength + 0.0001;
-          material.needsUpdate = true;
-        }
-      }
-    } else {
-      this._applyScaledOpacities(alpha);
-    }
+    if (this._useVectorReveal) this._vectorReveal.interpolate(alpha);
+    else this._applyScaledOpacities(alpha);
   }
 
-  /**
-   * Ensure stroke is fully visible at the end
-   */
-  override finish(): void {
-    if (this._useDashReveal) {
-      // Restore fill opacity
-      if (this._hasFill) {
-        (this.mobject as VMobject).setFillOpacity(this._originalFillOpacity);
-      }
+  protected override _interpolateRawAlpha(rawAlpha: number): void {
+    this.interpolate(this._useVectorReveal ? rawAlpha : this.rateFunc(rawAlpha));
+  }
 
-      // Disable dashing, show full stroke
-      for (const child of this._line2Children) {
-        const material = child.material as LineMaterial;
-        material.dashed = false;
-        material.needsUpdate = true;
-      }
-    } else {
-      this._applyScaledOpacities(1);
-    }
+  override finish(): void {
+    if (this._useVectorReveal) this._vectorReveal.restore();
+    else this._applyScaledOpacities(1);
     super.finish();
+  }
+
+  override reset(): void {
+    // Vector reveal changes every leaf's point count. Restore the leaf topology
+    // before Animation.reset() asks a VGroup root to repartition its aggregate
+    // snapshot across those children.
+    this._vectorReveal.restore(false);
+    super.reset();
+    if (this._useVectorReveal) this._vectorReveal.restore();
+    else this._applyScaledOpacities(1);
+    this._useVectorReveal = false;
   }
 }
 
@@ -284,98 +162,55 @@ export function create(mobject: Mobject, options?: CreateOptions): Create {
  * DrawBorderThenFill - draws the border progressively, then fills.
  * A variant of Create that traces the stroke first, then fades in the fill.
  */
-export class DrawBorderThenFill extends Animation {
-  /** Whether to use dash-based reveal */
-  private _useDashReveal: boolean = false;
-  /** Total path length for dash-based reveal */
-  private _totalLength: number = 1;
-  /** Original fill opacity to restore */
-  private _originalFillOpacity: number = 0;
+export interface DrawBorderThenFillOptions extends AnimationOptions {
+  /** Stagger between leaf paths. Default: 0 (simultaneous). */
+  lagRatio?: number;
+  /** Width of the temporary outline drawn before the fill. Default: 2. */
+  strokeWidth?: number;
+}
 
-  constructor(mobject: Mobject, options: AnimationOptions = {}) {
-    // Manim default for DrawBorderThenFill is 2 seconds
-    super(mobject, { duration: options.duration ?? 2, ...options });
+export class DrawBorderThenFill extends Animation {
+  private readonly _vectorReveal: VectorPathReveal;
+  private _useVectorReveal: boolean = false;
+
+  constructor(mobject: Mobject, options: DrawBorderThenFillOptions = {}) {
+    super(mobject, {
+      ...options,
+      duration: options.duration ?? 2,
+      rateFunc: options.rateFunc ?? doubleSmooth,
+    });
+    this._vectorReveal = new VectorPathReveal(mobject, {
+      lagRatio: options.lagRatio ?? 0,
+      outlineStrokeWidth: options.strokeWidth,
+      rateFunc: this.rateFunc,
+    });
   }
 
   override begin(): void {
     super.begin();
-    this._useDashReveal = this.mobject instanceof VMobject && hasLine2Children(this.mobject);
-
-    if (this._useDashReveal) {
-      const vmob = this.mobject as VMobject;
-      this._originalFillOpacity = vmob.fillOpacity;
-      vmob.setFillOpacity(0); // Hide fill initially
-
-      // Set up stroke tracing with dashes
-      const threeObj = this.mobject.getThreeObject();
-      threeObj.traverse((child) => {
-        if (child instanceof Line2) {
-          const material = child.material as LineMaterial;
-          material.dashed = true;
-          material.dashScale = 1;
-          child.computeLineDistances();
-          this._totalLength = getLine2TotalLength(child);
-          material.dashSize = 0;
-          material.gapSize = this._totalLength;
-          material.needsUpdate = true;
-        }
-      });
-    }
+    this._useVectorReveal = this._vectorReveal.begin();
   }
 
   interpolate(alpha: number): void {
-    if (this._useDashReveal) {
-      const vmob = this.mobject as VMobject;
+    if (this._useVectorReveal) this._vectorReveal.interpolate(alpha);
+  }
 
-      if (alpha < 0.5) {
-        // First half: draw border with dash reveal
-        const strokeAlpha = alpha * 2;
-        const threeObj = this.mobject.getThreeObject();
-        threeObj.traverse((child) => {
-          if (child instanceof Line2) {
-            const material = child.material as LineMaterial;
-            const visibleLength = strokeAlpha * this._totalLength;
-            material.dashSize = visibleLength;
-            material.gapSize = this._totalLength - visibleLength + 0.0001;
-            material.needsUpdate = true;
-          }
-        });
-      } else {
-        // Second half: fill in
-        const fillAlpha = (alpha - 0.5) * 2;
-        vmob.setFillOpacity(this._originalFillOpacity * fillAlpha);
-
-        // Ensure stroke is fully visible (disable dashing)
-        const threeObj = this.mobject.getThreeObject();
-        threeObj.traverse((child) => {
-          if (child instanceof Line2) {
-            const material = child.material as LineMaterial;
-            if (material.dashed) {
-              material.dashed = false;
-              material.needsUpdate = true;
-            }
-          }
-        });
-      }
-    }
+  protected override _interpolateRawAlpha(rawAlpha: number): void {
+    this.interpolate(rawAlpha);
   }
 
   override finish(): void {
-    if (this._useDashReveal) {
-      const vmob = this.mobject as VMobject;
-      vmob.setFillOpacity(this._originalFillOpacity);
-
-      // Ensure dashing is disabled
-      const threeObj = this.mobject.getThreeObject();
-      threeObj.traverse((child) => {
-        if (child instanceof Line2) {
-          const material = child.material as LineMaterial;
-          material.dashed = false;
-          material.needsUpdate = true;
-        }
-      });
-    }
+    if (this._useVectorReveal) this._vectorReveal.restore();
     super.finish();
+  }
+
+  override reset(): void {
+    // See Create.reset(): a partial family cannot accept the root's full
+    // aggregate point snapshot until its leaves have been restored.
+    this._vectorReveal.restore(false);
+    super.reset();
+    this._vectorReveal.restore();
+    this._useVectorReveal = false;
   }
 }
 
@@ -384,7 +219,7 @@ export class DrawBorderThenFill extends Animation {
  */
 export function drawBorderThenFill(
   mobject: Mobject,
-  options?: AnimationOptions,
+  options?: DrawBorderThenFillOptions,
 ): DrawBorderThenFill {
   return new DrawBorderThenFill(mobject, options);
 }
@@ -398,6 +233,7 @@ export class Uncreate extends Animation {
   private _totalLength: number = 0;
   /** Whether to use dash-based reveal */
   private _useDashReveal: boolean = false;
+  private _fallbackPaint: PaintOpacitySnapshot = [];
 
   constructor(mobject: Mobject, options: AnimationOptions = {}) {
     // Manim default for Uncreate is 2 seconds
@@ -407,6 +243,7 @@ export class Uncreate extends Animation {
   override begin(): void {
     super.begin();
     this._useDashReveal = this.mobject instanceof VMobject && hasLine2Children(this.mobject);
+    this._fallbackPaint = capturePaintOpacity(this.mobject);
 
     if (this._useDashReveal) {
       const threeObj = this.mobject.getThreeObject();
@@ -440,7 +277,7 @@ export class Uncreate extends Animation {
         }
       });
     } else {
-      this.mobject.setStrokeOpacity(1 - alpha);
+      applyPaintOpacityFactor(this._fallbackPaint, 1 - alpha);
     }
   }
 
@@ -456,9 +293,14 @@ export class Uncreate extends Animation {
         }
       });
     } else {
-      this.mobject.setStrokeOpacity(0);
+      applyPaintOpacityFactor(this._fallbackPaint, 0);
     }
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._fallbackPaint);
   }
 }
 
@@ -491,6 +333,18 @@ export interface WriteOptions extends AnimationOptions {
   useSkeletonStroke?: boolean;
 }
 
+function defaultWriteDuration(mobject: Mobject): number {
+  const pointBearingLeaves = mobject
+    .getFamily()
+    .filter(
+      (member) =>
+        member instanceof VMobject &&
+        member.children.length === 0 &&
+        member.getLocalPoints().length > 0,
+    ).length;
+  return pointBearingLeaves < 15 ? 1 : 2;
+}
+
 /**
  * Write animation specifically for Text and MathTex mobjects.
  * Reveals text character by character with a pen-stroke effect.
@@ -507,14 +361,13 @@ export class Write extends Animation {
   private _remover: boolean;
   private _strokeRatio: number;
   private _originalOpacity: number = 1;
+  private _fallbackPaint: PaintOpacitySnapshot = [];
 
   // Rendering mode flags (mutually exclusive)
   private _useGlyphStroke: boolean = false;
-  private _useDashReveal: boolean = false;
+  private _useVectorReveal: boolean = false;
   private _useRevealProgress: boolean = false;
-
-  // Dash reveal state
-  private _totalLength: number = 0;
+  private readonly _vectorReveal: VectorPathReveal;
 
   // Glyph stroke state
   private _glyphGroup: TextGlyphGroup | null = null;
@@ -529,16 +382,28 @@ export class Write extends Animation {
   private _skeletonTotalLengths: number[] = [];
 
   constructor(mobject: Mobject, options: WriteOptions = {}) {
-    super(mobject, { duration: options.duration ?? 1, ...options });
+    super(mobject, {
+      ...options,
+      duration: options.duration ?? defaultWriteDuration(mobject),
+      rateFunc: options.rateFunc ?? linear,
+    });
     this.lagRatio = options.lagRatio ?? 0.05;
     this._reverse = options.reverse ?? false;
     this._remover = options.remover ?? false;
+    this.remover = this._remover;
     this._strokeRatio = options.strokeRatio ?? 0.7;
+    this._vectorReveal = new VectorPathReveal(mobject, {
+      lagRatio: options.lagRatio,
+      outlineStrokeWidth: 2,
+      rateFunc: this.rateFunc,
+      reverseFamily: this._reverse,
+    });
   }
 
   override begin(): void {
     super.begin();
     this._originalOpacity = this.mobject.opacity;
+    this._fallbackPaint = capturePaintOpacity(this.mobject);
 
     // Priority 1: Check for glyph stroke mode
     if (
@@ -564,32 +429,13 @@ export class Write extends Animation {
       return;
     }
 
-    // Priority 3: Dash reveal for VMobjects with Line2
-    this._useDashReveal = this.mobject instanceof VMobject && hasLine2Children(this.mobject);
+    // Priority 3: family-aware vector reveal for MathTex and other VMobjects.
+    this._useVectorReveal = this._vectorReveal.begin();
 
-    if (this._useDashReveal) {
-      const threeObj = this.mobject.getThreeObject();
-      threeObj.traverse((child) => {
-        if (child instanceof Line2) {
-          const material = child.material as LineMaterial;
-          material.dashed = true;
-          material.dashScale = 1;
-
-          child.computeLineDistances();
-          this._totalLength = getLine2TotalLength(child);
-
-          if (this._reverse) {
-            material.dashSize = this._totalLength;
-            material.gapSize = 0;
-          } else {
-            material.dashSize = 0;
-            material.gapSize = this._totalLength;
-          }
-          material.needsUpdate = true;
-        }
-      });
+    if (this._useVectorReveal) {
+      if (this._reverse) this._vectorReveal.interpolate(1);
     } else {
-      this.mobject.setStrokeOpacity(this._reverse ? this._originalOpacity : 0);
+      applyPaintOpacityFactor(this._fallbackPaint, this._reverse ? 1 : 0);
     }
   }
 
@@ -721,20 +567,15 @@ export class Write extends Animation {
       this._interpolateGlyphStroke(effectiveAlpha);
     } else if (this._useRevealProgress) {
       (this.mobject as unknown as RevealProgressMobject).setRevealProgress(effectiveAlpha);
-    } else if (this._useDashReveal) {
-      const threeObj = this.mobject.getThreeObject();
-      threeObj.traverse((child) => {
-        if (child instanceof Line2) {
-          const material = child.material as LineMaterial;
-          const visibleLength = effectiveAlpha * this._totalLength;
-          material.dashSize = visibleLength;
-          material.gapSize = this._totalLength - visibleLength + 0.0001;
-          material.needsUpdate = true;
-        }
-      });
+    } else if (this._useVectorReveal) {
+      this._vectorReveal.interpolate(effectiveAlpha);
     } else {
-      this.mobject.setStrokeOpacity(this._originalOpacity * effectiveAlpha);
+      applyPaintOpacityFactor(this._fallbackPaint, effectiveAlpha);
     }
+  }
+
+  protected override _interpolateRawAlpha(rawAlpha: number): void {
+    this.interpolate(this._useVectorReveal ? rawAlpha : this.rateFunc(rawAlpha));
   }
 
   /**
@@ -872,32 +713,35 @@ export class Write extends Animation {
     }
 
     if (this._remover) {
-      if (this._useDashReveal) {
-        const threeObj = this.mobject.getThreeObject();
-        threeObj.traverse((child) => {
-          if (child instanceof Line2) {
-            const material = child.material as LineMaterial;
-            material.dashSize = 0;
-            material.gapSize = this._totalLength;
-            material.needsUpdate = true;
-          }
-        });
-      }
-      this.mobject.setStrokeOpacity(0);
+      if (this._useVectorReveal) this._vectorReveal.hide();
+      if (!this._useVectorReveal) applyPaintOpacityFactor(this._fallbackPaint, 0);
     } else {
-      if (this._useDashReveal) {
-        const threeObj = this.mobject.getThreeObject();
-        threeObj.traverse((child) => {
-          if (child instanceof Line2) {
-            const material = child.material as LineMaterial;
-            material.dashed = false;
-            material.needsUpdate = true;
-          }
-        });
-      }
-      this.mobject.setStrokeOpacity(this._originalOpacity);
+      if (this._useVectorReveal) this._vectorReveal.restore();
+      else restorePaintOpacity(this._fallbackPaint);
     }
     super.finish();
+  }
+
+  override reset(): void {
+    // Family-aware Write slices vector leaves, so restore their exact point
+    // counts before the base VGroup snapshot is repartitioned.
+    if (this._useGlyphStroke && this._glyphGroup) {
+      const remover = this._remover;
+      this._remover = false;
+      this._finishGlyphStroke();
+      this._remover = remover;
+    } else if (this._useVectorReveal) {
+      this._vectorReveal.restore(false);
+    }
+    super.reset();
+    if (this._useVectorReveal) {
+      this._vectorReveal.restore();
+    } else if (!this._useGlyphStroke && !this._useRevealProgress) {
+      restorePaintOpacity(this._fallbackPaint);
+    }
+    this._useGlyphStroke = false;
+    this._useVectorReveal = false;
+    this._useRevealProgress = false;
   }
 
   /**

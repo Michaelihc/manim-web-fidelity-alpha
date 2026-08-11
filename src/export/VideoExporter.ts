@@ -152,7 +152,14 @@ export class VideoExporter {
         mimeType = 'video/webm;codecs=vp9';
       }
     } else {
-      mimeType = 'video/mp4'; // Note: MP4 support varies by browser
+      // A generic `video/mp4` request lets Chromium select VP9-in-MP4, whose
+      // software encoder can be orders of magnitude slower than the canvas
+      // render itself. Prefer explicit H.264 (Main@4.2 covers 1080p60), then
+      // fall back through the more widely supported Baseline profile.
+      mimeType =
+        ['video/mp4;codecs=avc1.4D402A', 'video/mp4;codecs=avc1.42E01E'].find((candidate) =>
+          MediaRecorder.isTypeSupported(candidate),
+        ) ?? 'video/mp4';
     }
 
     if (!MediaRecorder.isTypeSupported(mimeType)) {
@@ -216,8 +223,7 @@ export class VideoExporter {
    * @returns Promise resolving to the video Blob
    */
   async exportTimeline(duration?: number): Promise<Blob> {
-    const totalDuration =
-      duration ?? this._options.duration ?? this._scene.getTimelineDuration() ?? 5;
+    const totalDuration = this._resolveDuration(duration);
     const totalFrames = Math.ceil(totalDuration * this._options.fps);
     const frameDuration = 1 / this._options.fps;
 
@@ -268,9 +274,26 @@ export class VideoExporter {
     const audioManager = this._getAudioManager();
     if (!audioManager || audioManager.tracks.length === 0) return null;
 
-    const totalDuration =
-      duration ?? this._options.duration ?? this._scene.getTimelineDuration() ?? 5;
+    const totalDuration = this._resolveDuration(duration);
     return audioManager.exportWAV(totalDuration);
+  }
+
+  /**
+   * Resolve an export duration without allowing the constructor's sentinel
+   * value of 0 to mask the scene timeline. A positive explicit override wins,
+   * followed by the configured option and the scene's cumulative duration.
+   */
+  private _resolveDuration(duration?: number): number {
+    const candidates = [duration, this._options.duration, this._scene.getTimelineDuration()];
+    return (
+      candidates.find(
+        (candidate): candidate is number =>
+          candidate !== null &&
+          candidate !== undefined &&
+          Number.isFinite(candidate) &&
+          candidate > 0,
+      ) ?? 5
+    );
   }
 
   /**

@@ -55,6 +55,7 @@ export interface MobjectLike {
   children: MobjectLike[];
   color: string;
   opacity: number;
+  zIndex: number;
   strokeWidth: number;
   fillOpacity: number;
   savedState: MobjectLike | null;
@@ -72,6 +73,7 @@ export interface MobjectLike {
     max: { x: number; y: number; z: number };
   };
   getBoundingBox(): { width: number; height: number; depth: number };
+  isEmpty(): boolean;
   moveTo(target: Vector3Tuple | MobjectLike, alignedEdge?: Vector3Tuple): MobjectLike;
   rotate(angle: number, axisOrOptions?: Vector3Tuple | AxisOrOptions): MobjectLike;
   copy(): MobjectLike;

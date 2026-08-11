@@ -23,9 +23,17 @@
  */
 
 import { VMobject } from '../../core/VMobject';
+import type { Mobject } from '../../core/Mobject';
 import { Animation, AnimationOptions } from '../Animation';
-import { lerp, lerpPoint } from '../../utils/math';
+import { lerpPoint } from '../../utils/math';
 import { alignCompoundPathsForTransform } from '../../core/VMobjectTransformAlignment';
+import {
+  applyPaintOpacityFactor,
+  capturePaintOpacity,
+  interpolatePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from './PaintOpacity';
 
 export interface TransformMatchingBaseOptions extends AnimationOptions {
   /** Key function to extract identifier for matching */
@@ -39,16 +47,14 @@ interface MatchedPart {
   target: VMobject;
   startPoints: number[][];
   targetPoints: number[][];
-  startOpacity: number;
-  targetOpacity: number;
   alignedSubpathLengths?: number[];
+  startPaint: PaintOpacitySnapshot;
+  targetPaint: PaintOpacitySnapshot;
 }
 
 interface FadingPart {
   mobject: VMobject;
-  fadeIn: boolean;
-  startOpacity: number;
-  targetOpacity: number;
+  paint: PaintOpacitySnapshot;
 }
 
 export abstract class TransformMatchingAbstractBase extends Animation {
@@ -69,6 +75,12 @@ export abstract class TransformMatchingAbstractBase extends Animation {
 
   /** Target parts that will fade in (no match in source) */
   protected _fadeInParts: FadingPart[] = [];
+
+  /** Parents of temporary unmatched-target copies. */
+  private _fadeInParents = new Map<VMobject, Mobject>();
+
+  /** Exact source family paint values for backward seeking/reset. */
+  private _sourcePaint: PaintOpacitySnapshot = [];
 
   constructor(source: VMobject, target: VMobject, options: TransformMatchingBaseOptions = {}) {
     super(source, options);
@@ -139,9 +151,7 @@ export abstract class TransformMatchingAbstractBase extends Animation {
         const vmob = sourceParts[i];
         this._fadeOutParts.push({
           mobject: vmob,
-          fadeIn: false,
-          startOpacity: vmob.opacity,
-          targetOpacity: 0,
+          paint: capturePaintOpacity(vmob),
         });
       }
     }
@@ -151,16 +161,16 @@ export abstract class TransformMatchingAbstractBase extends Animation {
       if (!usedTargetIndices.has(i)) {
         const vmob = targetParts[i];
         const copy = vmob.copy() as VMobject;
-        copy.opacity = 0;
+        const paint = capturePaintOpacity(copy);
+        applyPaintOpacityFactor(paint, 0);
         const parent = this.mobject.parent;
         if (parent) {
           parent.add(copy);
+          this._fadeInParents.set(copy, parent);
         }
         this._fadeInParts.push({
           mobject: copy,
-          fadeIn: true,
-          startOpacity: 0,
-          targetOpacity: vmob.opacity,
+          paint,
         });
       }
     }
@@ -191,9 +201,9 @@ export abstract class TransformMatchingAbstractBase extends Animation {
         target,
         startPoints: alignedCompound.srcAlignedPoints,
         targetPoints: alignedCompound.tgtAlignedPoints,
-        startOpacity: source.opacity,
-        targetOpacity: target.opacity,
         alignedSubpathLengths: alignedCompound.alignedSubpathLengths,
+        startPaint: capturePaintOpacity(source),
+        targetPaint: capturePaintOpacity(target),
       });
 
       source.setPoints(alignedCompound.srcAlignedPoints);
@@ -206,9 +216,9 @@ export abstract class TransformMatchingAbstractBase extends Animation {
         target,
         startPoints: srcCopy.getLocalPoints(),
         targetPoints: tgtCopy.getLocalPoints(),
-        startOpacity: source.opacity,
-        targetOpacity: target.opacity,
         alignedSubpathLengths: undefined,
+        startPaint: capturePaintOpacity(source),
+        targetPaint: capturePaintOpacity(target),
       });
 
       // Set source to have aligned points
@@ -218,7 +228,12 @@ export abstract class TransformMatchingAbstractBase extends Animation {
   }
 
   override begin(): void {
+    this._detachFadeInCopies();
+    this._matchedParts = [];
+    this._fadeOutParts = [];
+    this._fadeInParts = [];
     super.begin();
+    this._sourcePaint = capturePaintOpacity(this.mobject);
     this._matchParts();
   }
 
@@ -231,21 +246,22 @@ export abstract class TransformMatchingAbstractBase extends Animation {
       }
       part.source.setPoints(points);
       part.source.setTransformSubpathLengths(part.alignedSubpathLengths);
-      part.source.opacity = lerp(part.startOpacity, part.targetOpacity, alpha);
+      interpolatePaintOpacity(part.startPaint, part.targetPaint, alpha);
     }
 
     // Handle fading parts with adjusted timing
     // Fade out happens in first portion, fade in happens in last portion
-    const fadeOutAlpha = Math.min(1, alpha / this.fadeRatio);
+    const fadeOutAlpha = this.fadeRatio === 0 ? 1 : Math.min(1, alpha / this.fadeRatio);
     const fadeInStart = 1 - this.fadeRatio;
-    const fadeInAlpha = Math.max(0, (alpha - fadeInStart) / this.fadeRatio);
+    const fadeInAlpha =
+      this.fadeRatio === 0 ? 1 : Math.max(0, (alpha - fadeInStart) / this.fadeRatio);
 
     for (const part of this._fadeOutParts) {
-      part.mobject.opacity = lerp(part.startOpacity, 0, Math.min(1, fadeOutAlpha));
+      applyPaintOpacityFactor(part.paint, 1 - Math.min(1, fadeOutAlpha));
     }
 
     for (const part of this._fadeInParts) {
-      part.mobject.opacity = lerp(0, part.targetOpacity, Math.min(1, fadeInAlpha));
+      applyPaintOpacityFactor(part.paint, Math.min(1, fadeInAlpha));
     }
   }
 
@@ -254,19 +270,37 @@ export abstract class TransformMatchingAbstractBase extends Animation {
     for (const part of this._matchedParts) {
       part.source.setPoints(part.targetPoints);
       part.source.setTransformSubpathLengths(undefined);
-      part.source.opacity = part.targetOpacity;
+      interpolatePaintOpacity(part.startPaint, part.targetPaint, 1);
       part.source.color = part.target.color;
     }
 
     // Finalize fading parts
     for (const part of this._fadeOutParts) {
-      part.mobject.opacity = 0;
+      applyPaintOpacityFactor(part.paint, 0);
     }
 
     for (const part of this._fadeInParts) {
-      part.mobject.opacity = part.targetOpacity;
+      restorePaintOpacity(part.paint);
     }
 
     super.finish();
+  }
+
+  override reset(): void {
+    this._detachFadeInCopies();
+    super.reset();
+    restorePaintOpacity(this._sourcePaint);
+    this._matchedParts = [];
+    this._fadeOutParts = [];
+    this._fadeInParts = [];
+  }
+
+  private _detachFadeInCopies(): void {
+    for (const [copy, parent] of this._fadeInParents) parent.remove(copy);
+    this._fadeInParents.clear();
+  }
+
+  override getAllMobjects(): readonly Mobject[] {
+    return [this.mobject, this.target];
   }
 }

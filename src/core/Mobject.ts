@@ -93,6 +93,7 @@ export abstract class Mobject {
     }
   }
   protected _opacity: number = 1;
+  protected _zIndex: number = 0;
   strokeWidth: number = 4;
   fillOpacity: number = 0;
   /** When true, children skip the 2D z-layering offset in _syncToThree. */
@@ -145,17 +146,30 @@ export abstract class Mobject {
     this.setStrokeOpacity(value);
   }
 
+  get zIndex(): number {
+    return this._zIndex;
+  }
+
+  set zIndex(value: number) {
+    if (!Number.isFinite(value)) {
+      throw new TypeError(`Mobject.zIndex must be finite, got ${value}`);
+    }
+    if (this._zIndex !== value) {
+      this._zIndex = value;
+      this._markDirty();
+    }
+  }
+
   get style(): MobjectStyle {
     return { ...this._style };
   }
 
   setStyle(style: Partial<MobjectStyle>): this {
-    this._style = { ...this._style, ...style };
-    if (style.strokeColor !== undefined) this.color = style.strokeColor;
-    if (style.fillOpacity !== undefined) this.fillOpacity = style.fillOpacity;
-    if (style.strokeOpacity !== undefined) this._opacity = style.strokeOpacity;
-    if (style.strokeWidth !== undefined) this.strokeWidth = style.strokeWidth;
-    this._markDirty();
+    if (style.fillColor !== undefined) this.fillColor = style.fillColor;
+    if (style.fillOpacity !== undefined) this.setFillOpacity(style.fillOpacity);
+    if (style.strokeColor !== undefined) this.strokeColor = style.strokeColor;
+    if (style.strokeOpacity !== undefined) this.setStrokeOpacity(style.strokeOpacity);
+    if (style.strokeWidth !== undefined) this.setStrokeWidth(style.strokeWidth);
     return this;
   }
 
@@ -164,10 +178,24 @@ export abstract class Mobject {
   }
 
   setColor(color: string): this {
-    if (this._color !== color) {
+    if (
+      this._color !== color ||
+      this._style.strokeColor !== color ||
+      this._style.fillColor !== color
+    ) {
       this.color = color;
       this._markDirty();
     }
+    return this;
+  }
+
+  /**
+   * Set both fill and stroke opacity, matching Manim's set_opacity semantics.
+   * Color channels remain untouched.
+   */
+  setOpacity(opacity: number): this {
+    this.setFillOpacity(opacity);
+    this.setStrokeOpacity(opacity);
     return this;
   }
 
@@ -207,6 +235,28 @@ export abstract class Mobject {
     return this;
   }
 
+  /**
+   * Set stroke properties without changing the fill channel.
+   */
+  setStroke(color?: string, width?: number, opacity?: number): this {
+    if (color !== undefined) this.strokeColor = color;
+    if (width !== undefined) this.setStrokeWidth(width);
+    if (opacity !== undefined) this.setStrokeOpacity(opacity);
+    return this;
+  }
+
+  /**
+   * Set z-index state on this mobject and, by default, its family.
+   * Scene/renderer ordering is wired separately.
+   */
+  setZIndex(zIndex: number, family: boolean = true): this {
+    this.zIndex = zIndex;
+    if (family) {
+      for (const child of this.children) child.setZIndex(zIndex, true);
+    }
+    return this;
+  }
+
   get fillColor(): string | undefined {
     return this._style.fillColor;
   }
@@ -223,8 +273,11 @@ export abstract class Mobject {
   }
 
   set strokeColor(color: string) {
-    if (this._style.strokeColor !== color) {
+    if (this._style.strokeColor !== color || this._color !== color) {
       this._style.strokeColor = color;
+      // `color` remains the legacy renderer-facing stroke value. Keep it in
+      // sync without using the color setter, which would also overwrite fill.
+      this._color = color;
       this._markDirty();
     }
   }
@@ -476,6 +529,47 @@ export abstract class Mobject {
     return this.scale(scaleFactors);
   }
 
+  /**
+   * Uniformly scale until the world-space bounding-box width matches `width`.
+   */
+  scaleToFitWidth(width: number): this {
+    return this._rescaleToFit(width, 0, false);
+  }
+
+  /**
+   * Uniformly scale until the world-space bounding-box height matches `height`.
+   */
+  scaleToFitHeight(height: number): this {
+    return this._rescaleToFit(height, 1, false);
+  }
+
+  /**
+   * Stretch only the x dimension until the world-space bounding-box width
+   * matches `width`.
+   */
+  stretchToFitWidth(width: number): this {
+    return this._rescaleToFit(width, 0, true);
+  }
+
+  /**
+   * Stretch only the y dimension until the world-space bounding-box height
+   * matches `height`.
+   */
+  stretchToFitHeight(height: number): this {
+    return this._rescaleToFit(height, 1, true);
+  }
+
+  private _rescaleToFit(length: number, dim: 0 | 1, stretch: boolean): this {
+    if (!Number.isFinite(length) || length < 0) {
+      throw new RangeError(`fit length must be a finite non-negative number, got ${length}`);
+    }
+    const bounds = this.getBoundingBox();
+    const currentLength = dim === 0 ? bounds.width : bounds.height;
+    if (currentLength === 0) return this;
+    const factor = length / currentLength;
+    return stretch ? this.stretch(factor, dim) : this.scale(factor);
+  }
+
   // ── Hierarchy ────────────────────────────────────────────────────
 
   add(...mobjects: Mobject[]): this {
@@ -554,6 +648,7 @@ export abstract class Mobject {
     clone.scaleVector.copy(this.scaleVector);
     clone.color = this.color;
     clone._opacity = this._opacity;
+    clone._zIndex = this._zIndex;
     clone.strokeWidth = this.strokeWidth;
     clone.fillOpacity = this.fillOpacity;
     clone._style = { ...this._style };
@@ -591,6 +686,7 @@ export abstract class Mobject {
 
   become(other: Mobject): this {
     becomeMobjectImpl(this, other);
+    this._zIndex = other._zIndex;
     return this;
   }
 
@@ -697,10 +793,21 @@ export abstract class Mobject {
     target: Mobject | Vector3Tuple,
     direction: Vector3Tuple = RIGHT,
     buff: number = 0.25,
+    alignedEdge: Vector3Tuple = [0, 0, 0],
   ): this {
     const tPt = Array.isArray(target) ? target : target.getCenter();
-    const sEdge = this._getEdgeInDirection([-direction[0], -direction[1], -direction[2]]);
-    const tEdge = Array.isArray(target) ? tPt : target._getEdgeInDirection(direction);
+    const sEdge = this._getEdgeInDirection([
+      alignedEdge[0] - direction[0],
+      alignedEdge[1] - direction[1],
+      alignedEdge[2] - direction[2],
+    ]);
+    const tEdge = Array.isArray(target)
+      ? tPt
+      : target._getEdgeInDirection([
+          alignedEdge[0] + direction[0],
+          alignedEdge[1] + direction[1],
+          alignedEdge[2] + direction[2],
+        ]);
     const len = Math.sqrt(direction[0] ** 2 + direction[1] ** 2 + direction[2] ** 2) || 1;
     const n: Vector3Tuple = [direction[0] / len, direction[1] / len, direction[2] / len];
     return this.shift([

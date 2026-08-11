@@ -8,6 +8,12 @@ import { VMobject } from '../../core/VMobject';
 import { Animation, AnimationOptions } from '../Animation';
 import { Line2 } from 'three/examples/jsm/lines/Line2.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import {
+  applyPaintOpacityFactor,
+  capturePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from '../transform/PaintOpacity';
 
 /** Interface for mobjects that support getText/setText */
 interface TextLikeMobject {
@@ -98,7 +104,7 @@ export interface ShowIncreasingSubsetsOptions extends AnimationOptions {
  */
 export class ShowIncreasingSubsets extends Animation {
   private _submobjects: Mobject[] = [];
-  private _originalOpacities: number[] = [];
+  private _paint: PaintOpacitySnapshot[] = [];
 
   constructor(mobject: Mobject, options: ShowIncreasingSubsetsOptions = {}) {
     super(mobject, options);
@@ -109,10 +115,10 @@ export class ShowIncreasingSubsets extends Animation {
 
     // Get all submobjects
     this._submobjects = [...this.mobject.children];
-    this._originalOpacities = this._submobjects.map((m) => m.opacity);
+    this._paint = this._submobjects.map(capturePaintOpacity);
 
     // Hide all submobjects initially
-    this._submobjects.forEach((m) => m.setStrokeOpacity(0));
+    this._paint.forEach((paint) => applyPaintOpacityFactor(paint, 0));
   }
 
   interpolate(alpha: number): void {
@@ -120,21 +126,26 @@ export class ShowIncreasingSubsets extends Animation {
 
     for (let i = 0; i < this._submobjects.length; i++) {
       if (i < numToShow) {
-        this._submobjects[i].setStrokeOpacity(this._originalOpacities[i]);
+        restorePaintOpacity(this._paint[i]);
       } else if (i === numToShow && alpha < 1) {
         // Partially show the current one
         const localAlpha = alpha * this._submobjects.length - numToShow;
-        this._submobjects[i].setStrokeOpacity(this._originalOpacities[i] * localAlpha);
+        applyPaintOpacityFactor(this._paint[i], localAlpha);
       } else {
-        this._submobjects[i].setStrokeOpacity(0);
+        applyPaintOpacityFactor(this._paint[i], 0);
       }
     }
   }
 
   override finish(): void {
     // Show all submobjects
-    this._submobjects.forEach((m, i) => m.setStrokeOpacity(this._originalOpacities[i]));
+    this._paint.forEach(restorePaintOpacity);
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    this._paint.forEach(restorePaintOpacity);
   }
 }
 
@@ -259,7 +270,7 @@ export type ShowSubmobjectsOneByOneOptions = AnimationOptions;
  */
 export class ShowSubmobjectsOneByOne extends Animation {
   private _submobjects: Mobject[] = [];
-  private _originalOpacities: number[] = [];
+  private _paint: PaintOpacitySnapshot[] = [];
   private _currentIndex: number = -1;
 
   constructor(mobject: Mobject, options: ShowSubmobjectsOneByOneOptions = {}) {
@@ -270,10 +281,10 @@ export class ShowSubmobjectsOneByOne extends Animation {
     super.begin();
 
     this._submobjects = [...this.mobject.children];
-    this._originalOpacities = this._submobjects.map((m) => m.opacity);
+    this._paint = this._submobjects.map(capturePaintOpacity);
 
     // Hide all submobjects initially
-    this._submobjects.forEach((m) => m.setStrokeOpacity(0));
+    this._paint.forEach((paint) => applyPaintOpacityFactor(paint, 0));
     this._currentIndex = -1;
   }
 
@@ -286,29 +297,33 @@ export class ShowSubmobjectsOneByOne extends Animation {
     if (newIndex !== this._currentIndex) {
       // Hide previous
       if (this._currentIndex >= 0 && this._currentIndex < this._submobjects.length) {
-        this._submobjects[this._currentIndex].setStrokeOpacity(0);
+        applyPaintOpacityFactor(this._paint[this._currentIndex], 0);
       }
 
       // Show current
       this._currentIndex = newIndex;
       if (this._currentIndex >= 0 && this._currentIndex < this._submobjects.length) {
-        this._submobjects[this._currentIndex].setStrokeOpacity(
-          this._originalOpacities[this._currentIndex],
-        );
+        restorePaintOpacity(this._paint[this._currentIndex]);
       }
     }
   }
 
   override finish(): void {
     // Show the last one (or restore all if that's the intended behavior)
-    this._submobjects.forEach((m, i) => {
+    this._submobjects.forEach((_m, i) => {
       if (i === this._submobjects.length - 1) {
-        m.setStrokeOpacity(this._originalOpacities[i]);
+        restorePaintOpacity(this._paint[i]);
       } else {
-        m.setStrokeOpacity(0);
+        applyPaintOpacityFactor(this._paint[i], 0);
       }
     });
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    this._paint.forEach(restorePaintOpacity);
+    this._currentIndex = -1;
   }
 }
 

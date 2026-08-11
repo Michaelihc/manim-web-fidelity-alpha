@@ -113,6 +113,39 @@ describe('Scene.add() defers auto-render (issue #317)', () => {
     scene.dispose();
   });
 
+  it('async batch suppresses renders across awaits and commits one frame', async () => {
+    const scene = Scene.createHeadless();
+    const renderSpy = vi.spyOn(scene as unknown as SceneInternals, '_render');
+    renderSpy.mockClear();
+
+    await scene.batch(async () => {
+      scene.add(new Circle());
+      await flushMicrotasks();
+      scene.add(new Square());
+      await flushMicrotasks();
+      expect(renderSpy).not.toHaveBeenCalled();
+    });
+
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+    scene.dispose();
+  });
+
+  it('nested batches commit only the outer transaction', async () => {
+    const scene = Scene.createHeadless();
+    const renderSpy = vi.spyOn(scene as unknown as SceneInternals, '_render');
+    renderSpy.mockClear();
+
+    await scene.batch(async () => {
+      scene.add(new Circle());
+      scene.batch(() => scene.add(new Square()));
+      await flushMicrotasks();
+      expect(renderSpy).not.toHaveBeenCalled();
+    });
+
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+    scene.dispose();
+  });
+
   it('ThreeDScene.add() also defers its render (#317)', async () => {
     const scene = ThreeDScene.createHeadless();
     const renderSpy = vi.spyOn(scene as unknown as SceneInternals, '_render');

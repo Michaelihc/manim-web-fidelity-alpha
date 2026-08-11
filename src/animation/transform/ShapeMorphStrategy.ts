@@ -45,6 +45,7 @@ export class ShapeMorphStrategy implements MorphStrategy {
   private _targetCopy: Mobject | null = null;
   private _sourceTextureMobject: TexturedMobject | null = null;
   private _targetTextureMobject: TexturedMobject | null = null;
+  private _targetThreeParent: THREE.Object3D | null = null;
 
   /**
    * Validate textured inputs, force lazy Three object construction, then cache display meshes.
@@ -119,6 +120,7 @@ export class ShapeMorphStrategy implements MorphStrategy {
     targetMesh.scale.set(this._startWidth, this._startHeight, 1);
     const sourceObj = source.getThreeObject();
     const targetObj = target.getThreeObject();
+    this._targetThreeParent = targetObj.parent;
     if (sourceObj.parent && !targetObj.parent) sourceObj.parent.add(targetObj);
     target.opacity = 0;
     target._syncToThree();
@@ -165,5 +167,39 @@ export class ShapeMorphStrategy implements MorphStrategy {
     const targetObj = this._targetTextureMobject.getThreeObject();
     if (targetObj.parent) targetObj.parent.remove(targetObj);
     source._markDirty();
+  }
+
+  reset(_animation: Animation, source: Mobject, target: Mobject): void {
+    if (
+      !this._sourceCopy ||
+      !this._targetCopy ||
+      !this._sourceTextureMobject ||
+      !this._targetTextureMobject
+    ) {
+      return;
+    }
+    if (!(this._sourceCopy instanceof TexturedMobject)) {
+      throw new Error('ShapeMorphStrategy reset requires textured source snapshot');
+    }
+    if (!(this._targetCopy instanceof TexturedMobject)) {
+      throw new Error('ShapeMorphStrategy reset requires textured target snapshot');
+    }
+
+    this._sourceTextureMobject.applyVisualSize(this._startWidth, this._startHeight);
+    this._sourceTextureMobject.applyTextureFrom(this._sourceCopy);
+    this._sourceTextureMobject.applyContentFrom(this._sourceCopy);
+    this._targetTextureMobject.applyVisualSize(this._targetWidth, this._targetHeight);
+    this._targetTextureMobject.applyTextureFrom(this._targetCopy);
+    this._targetTextureMobject.applyContentFrom(this._targetCopy);
+    source.become(this._sourceCopy);
+    target.become(this._targetCopy);
+
+    const targetObject = target.getThreeObject();
+    if (targetObject.parent !== this._targetThreeParent) {
+      targetObject.parent?.remove(targetObject);
+      this._targetThreeParent?.add(targetObject);
+    }
+    source._markDirty();
+    target._markDirty();
   }
 }

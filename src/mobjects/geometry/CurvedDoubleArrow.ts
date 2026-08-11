@@ -2,6 +2,7 @@ import { VMobject } from '../../core/VMobject';
 import { Vector3Tuple } from '../../core/Mobject';
 import { BLUE, DEFAULT_STROKE_WIDTH } from '../../constants';
 import { CurvedArrowOptions } from './CurvedArrow';
+import { ArrowTriangleFilledTip } from './ArrowTips';
 
 /**
  * CurvedDoubleArrow - A double arrow that follows an arc path
@@ -25,6 +26,8 @@ export class CurvedDoubleArrow extends VMobject {
   private _tipLength: number;
   private _tipWidth: number;
   private _numComponents: number;
+  private _startTip: ArrowTriangleFilledTip | null = null;
+  private _endTip: ArrowTriangleFilledTip | null = null;
 
   constructor(options: CurvedArrowOptions = {}) {
     super();
@@ -48,8 +51,10 @@ export class CurvedDoubleArrow extends VMobject {
     this._numComponents = numComponents;
 
     this.color = color;
-    this.fillOpacity = 1;
-    this.strokeWidth = strokeWidth;
+    // The arc is an open stroke. Each closed, filled tip is rendered by its own
+    // child VMobject so fill triangulation can never span the shaft.
+    this.setFillOpacity(0);
+    this.setStrokeWidth(strokeWidth);
 
     this._generatePoints();
   }
@@ -58,6 +63,15 @@ export class CurvedDoubleArrow extends VMobject {
    * Generate the curved double arrow points.
    */
   private _generatePoints(): void {
+    const previousStartFillOpacity = this._startTip?.fillOpacity ?? 1;
+    const previousEndFillOpacity = this._endTip?.fillOpacity ?? 1;
+    const oldTips = [this._startTip, this._endTip].filter(
+      (tip): tip is ArrowTriangleFilledTip => tip !== null,
+    );
+    this.remove(...oldTips);
+    this._startTip = null;
+    this._endTip = null;
+
     const points: number[][] = [];
 
     const start = this._startPoint;
@@ -76,69 +90,36 @@ export class CurvedDoubleArrow extends VMobject {
     }
 
     const halfAngle = Math.abs(this._angle) / 2;
+    if (halfAngle < 1e-10) {
+      this._generateStraightPoints(midZ, previousStartFillOpacity, previousEndFillOpacity);
+      return;
+    }
+
     const radius = halfChord / Math.sin(halfAngle);
     const distToCenter = radius * Math.cos(halfAngle);
 
     const chordLength = 2 * halfChord;
-    let perpX = -chordY / chordLength;
-    let perpY = chordX / chordLength;
-
-    if (this._angle > 0) {
-      perpX = -perpX;
-      perpY = -perpY;
-    }
+    const directionSign = Math.sign(this._angle) || 1;
+    const perpX = (-chordY / chordLength) * directionSign;
+    const perpY = (chordX / chordLength) * directionSign;
 
     const centerX = midX + distToCenter * perpX;
     const centerY = midY + distToCenter * perpY;
     const startAngle = Math.atan2(start[1] - centerY, start[0] - centerX);
 
-    // Calculate shortened angles for both ends
-    const shortenedAngleFromStart = (this._angle > 0 ? 1 : -1) * (this._tipLength / radius);
-    const shortenedAngleFromEnd = (this._angle > 0 ? -1 : 1) * (this._tipLength / radius);
+    // Calculate shortened angles for both ends. Clamp each trim to half the
+    // available arc so short arrows never produce a reversed shaft.
+    const arcLength = Math.abs(radius * this._angle);
+    const tipArcLength = Math.min(Math.max(0, this._tipLength), arcLength / 2);
+    const shortenedAngleFromStart = directionSign * (tipArcLength / radius);
+    const shortenedAngleFromEnd = -directionSign * (tipArcLength / radius);
 
     const actualStartAngle = startAngle + shortenedAngleFromStart;
     const actualEndAngle = startAngle + this._angle + shortenedAngleFromEnd;
     const actualArcAngle = actualEndAngle - actualStartAngle;
 
-    // Start tip
     const startTipBaseX = centerX + radius * Math.cos(actualStartAngle);
     const startTipBaseY = centerY + radius * Math.sin(actualStartAngle);
-
-    // Direction at start (tangent to arc, pointing away from start)
-    const startDirX = this._angle > 0 ? Math.sin(startAngle) : -Math.sin(startAngle);
-    const startDirY = this._angle > 0 ? -Math.cos(startAngle) : Math.cos(startAngle);
-    const startDirLen = Math.sqrt(startDirX * startDirX + startDirY * startDirY);
-    const normStartDirX = startDirX / startDirLen;
-    const normStartDirY = startDirY / startDirLen;
-
-    const startPerpX = -normStartDirY;
-    const startPerpY = normStartDirX;
-
-    const startTipLeftX = startTipBaseX + startPerpX * this._tipWidth;
-    const startTipLeftY = startTipBaseY + startPerpY * this._tipWidth;
-    const startTipRightX = startTipBaseX - startPerpX * this._tipWidth;
-    const startTipRightY = startTipBaseY - startPerpY * this._tipWidth;
-
-    // Helper to add line segment
-    const addLineSegment = (p0: number[], p1: number[], isFirst: boolean) => {
-      const dx = p1[0] - p0[0];
-      const dy = p1[1] - p0[1];
-      const dz = p1[2] - p0[2];
-      if (isFirst) {
-        points.push([...p0]);
-      }
-      points.push([p0[0] + dx / 3, p0[1] + dy / 3, p0[2] + dz / 3]);
-      points.push([p0[0] + (2 * dx) / 3, p0[1] + (2 * dy) / 3, p0[2] + (2 * dz) / 3]);
-      points.push([...p1]);
-    };
-
-    // Start tip
-    addLineSegment([start[0], start[1], midZ], [startTipLeftX, startTipLeftY, midZ], true);
-    addLineSegment(
-      [startTipLeftX, startTipLeftY, midZ],
-      [startTipBaseX, startTipBaseY, midZ],
-      false,
-    );
 
     // Arc shaft
     const numSegments = Math.max(
@@ -167,69 +148,105 @@ export class CurvedDoubleArrow extends VMobject {
       const x2 = x3 - kappa * radius * dx2;
       const y2 = y3 - kappa * radius * dy2;
 
+      if (i === 0) points.push([x0, y0, midZ]);
       points.push([x1, y1, midZ]);
       points.push([x2, y2, midZ]);
       points.push([x3, y3, midZ]);
     }
 
-    // End tip
     const endTipBaseX = centerX + radius * Math.cos(actualEndAngle);
     const endTipBaseY = centerY + radius * Math.sin(actualEndAngle);
 
-    const endAngleOnArc = startAngle + this._angle;
-    const endDirX = this._angle > 0 ? -Math.sin(endAngleOnArc) : Math.sin(endAngleOnArc);
-    const endDirY = this._angle > 0 ? Math.cos(endAngleOnArc) : -Math.cos(endAngleOnArc);
-    const endDirLen = Math.sqrt(endDirX * endDirX + endDirY * endDirY);
-    const normEndDirX = endDirX / endDirLen;
-    const normEndDirY = endDirY / endDirLen;
-
-    const endPerpX = -normEndDirY;
-    const endPerpY = normEndDirX;
-
-    const endTipLeftX = endTipBaseX + endPerpX * this._tipWidth;
-    const endTipLeftY = endTipBaseY + endPerpY * this._tipWidth;
-    const endTipRightX = endTipBaseX - endPerpX * this._tipWidth;
-    const endTipRightY = endTipBaseY - endPerpY * this._tipWidth;
-
-    addLineSegment([endTipBaseX, endTipBaseY, midZ], [endTipLeftX, endTipLeftY, midZ], false);
-    addLineSegment([endTipLeftX, endTipLeftY, midZ], [end[0], end[1], midZ], false);
-    addLineSegment([end[0], end[1], midZ], [endTipRightX, endTipRightY, midZ], false);
-    addLineSegment([endTipRightX, endTipRightY, midZ], [endTipBaseX, endTipBaseY, midZ], false);
-
-    // Return along arc (reversed)
-    for (let i = numSegments - 1; i >= 0; i--) {
-      const theta1 = actualStartAngle + (i + 1) * segmentAngle;
-      const theta2 = actualStartAngle + i * segmentAngle;
-
-      const x0 = centerX + radius * Math.cos(theta1);
-      const y0 = centerY + radius * Math.sin(theta1);
-      const x3 = centerX + radius * Math.cos(theta2);
-      const y3 = centerY + radius * Math.sin(theta2);
-
-      const dx1 = -Math.sin(theta1);
-      const dy1 = Math.cos(theta1);
-      const x1 = x0 - kappa * radius * dx1;
-      const y1 = y0 - kappa * radius * dy1;
-
-      const dx2 = -Math.sin(theta2);
-      const dy2 = Math.cos(theta2);
-      const x2 = x3 + kappa * radius * dx2;
-      const y2 = y3 + kappa * radius * dy2;
-
-      points.push([x1, y1, midZ]);
-      points.push([x2, y2, midZ]);
-      points.push([x3, y3, midZ]);
-    }
-
-    // Complete start tip
-    addLineSegment(
-      [startTipBaseX, startTipBaseY, midZ],
-      [startTipRightX, startTipRightY, midZ],
-      false,
-    );
-    addLineSegment([startTipRightX, startTipRightY, midZ], [start[0], start[1], midZ], false);
-
     this.setPoints3D(points);
+
+    this._startTip = this._createTip(
+      [start[0], start[1], midZ],
+      [startTipBaseX, startTipBaseY, midZ],
+      previousStartFillOpacity,
+    );
+    this._endTip = this._createTip(
+      [end[0], end[1], midZ],
+      [endTipBaseX, endTipBaseY, midZ],
+      previousEndFillOpacity,
+    );
+    this._addGeneratedTips();
+  }
+
+  private _generateStraightPoints(
+    midZ: number,
+    startFillOpacity: number,
+    endFillOpacity: number,
+  ): void {
+    const start = this._startPoint;
+    const end = this._endPoint;
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const length = Math.sqrt(dx * dx + dy * dy);
+    const dirX = dx / length;
+    const dirY = dy / length;
+    const trim = Math.min(Math.max(0, this._tipLength), length / 2);
+    const shaftStart: Vector3Tuple = [start[0] + dirX * trim, start[1] + dirY * trim, midZ];
+    const shaftEnd: Vector3Tuple = [end[0] - dirX * trim, end[1] - dirY * trim, midZ];
+
+    this.setPoints3D([
+      shaftStart,
+      [
+        shaftStart[0] + (shaftEnd[0] - shaftStart[0]) / 3,
+        shaftStart[1] + (shaftEnd[1] - shaftStart[1]) / 3,
+        midZ,
+      ],
+      [
+        shaftStart[0] + (2 * (shaftEnd[0] - shaftStart[0])) / 3,
+        shaftStart[1] + (2 * (shaftEnd[1] - shaftStart[1])) / 3,
+        midZ,
+      ],
+      shaftEnd,
+    ]);
+
+    this._startTip = this._createTip([start[0], start[1], midZ], shaftStart, startFillOpacity);
+    this._endTip = this._createTip([end[0], end[1], midZ], shaftEnd, endFillOpacity);
+    this._addGeneratedTips();
+  }
+
+  private _addGeneratedTips(): void {
+    if (this._startTip) this.add(this._startTip);
+    if (this._endTip) this.add(this._endTip);
+  }
+
+  private _createTip(
+    apex: Vector3Tuple,
+    base: Vector3Tuple,
+    fillOpacity: number,
+  ): ArrowTriangleFilledTip | null {
+    const dx = apex[0] - base[0];
+    const dy = apex[1] - base[1];
+    const dz = apex[2] - base[2];
+    const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (length < 1e-10 || this._tipWidth <= 0) return null;
+
+    return new ArrowTriangleFilledTip({
+      position: apex,
+      direction: [dx, dy, dz],
+      length,
+      width: this._tipWidth,
+      color: this.color,
+      strokeWidth: 0,
+      fillOpacity,
+    });
+  }
+
+  override setColor(color: string): this {
+    super.setColor(color);
+    this._startTip?.setColor(color);
+    this._endTip?.setColor(color);
+    return this;
+  }
+
+  override setFillOpacity(opacity: number): this {
+    super.setFillOpacity(0);
+    this._startTip?.setFillOpacity(opacity);
+    this._endTip?.setFillOpacity(opacity);
+    return this;
   }
 
   /**
@@ -295,6 +312,12 @@ export class CurvedDoubleArrow extends VMobject {
       strokeWidth: this.strokeWidth,
     });
     this._copyBaseAttributesInto(clone, { copyChildren: false, copyPosition: false });
+    if (this._startTip && clone._startTip) {
+      clone._startTip.setFillOpacity(this._startTip.fillOpacity);
+    }
+    if (this._endTip && clone._endTip) {
+      clone._endTip.setFillOpacity(this._endTip.fillOpacity);
+    }
     return clone;
   }
 }

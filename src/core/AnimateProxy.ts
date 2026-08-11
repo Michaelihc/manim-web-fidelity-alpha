@@ -15,7 +15,7 @@ import {
   type AxisOrOptions,
   registerAnimateProxy,
 } from './Mobject';
-import { VGroup } from './VGroup';
+import { VGroup, type ArrangeOptions } from './VGroup';
 import { Animation, type AnimationOptions } from '../animation/Animation';
 import { type RateFunction, smooth } from '../rate-functions';
 import { Transform } from '../animation/transform/Transform';
@@ -99,6 +99,36 @@ export class AnimateProxy extends Animation {
     return this;
   }
 
+  setStroke(color?: string, width?: number, opacity?: number): this {
+    this._calls.push(['setStroke', [color, width, opacity]]);
+    return this;
+  }
+
+  setZIndex(zIndex: number, family: boolean = true): this {
+    this._calls.push(['setZIndex', [zIndex, family]]);
+    return this;
+  }
+
+  scaleToFitWidth(width: number): this {
+    this._calls.push(['scaleToFitWidth', [width]]);
+    return this;
+  }
+
+  scaleToFitHeight(height: number): this {
+    this._calls.push(['scaleToFitHeight', [height]]);
+    return this;
+  }
+
+  stretchToFitWidth(width: number): this {
+    this._calls.push(['stretchToFitWidth', [width]]);
+    return this;
+  }
+
+  stretchToFitHeight(height: number): this {
+    this._calls.push(['stretchToFitHeight', [height]]);
+    return this;
+  }
+
   setStyle(style: Partial<MobjectStyle>): this {
     this._calls.push(['setStyle', [style]]);
     return this;
@@ -114,16 +144,35 @@ export class AnimateProxy extends Animation {
     return this;
   }
 
-  nextTo(target: Mobject | Vector3Tuple, direction?: Vector3Tuple, buff?: number): this {
+  nextTo(
+    target: Mobject | Vector3Tuple,
+    direction?: Vector3Tuple,
+    buff?: number,
+    alignedEdge?: Vector3Tuple,
+  ): this {
     const args: unknown[] = [target];
     if (direction !== undefined) args.push(direction);
     if (buff !== undefined) args.push(buff);
+    if (alignedEdge !== undefined) {
+      while (args.length < 3) args.push(undefined);
+      args.push(alignedEdge);
+    }
     this._calls.push(['nextTo', args]);
     return this;
   }
 
   alignTo(target: Mobject | Vector3Tuple, direction: Vector3Tuple): this {
     this._calls.push(['alignTo', [target, direction]]);
+    return this;
+  }
+
+  arrange(
+    direction?: Vector3Tuple,
+    buff?: number,
+    centerOrOptions?: boolean | ArrangeOptions,
+    alignedEdge?: Vector3Tuple,
+  ): this {
+    this._calls.push(['arrange', [direction, buff, centerOrOptions, alignedEdge]]);
     return this;
   }
 

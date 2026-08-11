@@ -8,6 +8,12 @@ import { Animation, AnimationOptions } from '../Animation';
 import { Transform } from './Transform';
 import { lerpPoint } from '../../utils/math';
 import { alignVmobjectPair } from './TransformPairing';
+import {
+  applyPaintOpacitySnapshot,
+  capturePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from './PaintOpacity';
 
 // ============================================================================
 // FadeTransform
@@ -35,11 +41,8 @@ export class FadeTransform extends Animation {
   /** Copy of the target points */
   private _targetPoints: number[][] = [];
 
-  /** Starting opacity */
-  private _startOpacity: number = 1;
-
-  /** Target opacity */
-  private _targetOpacity: number = 1;
+  private _startPaint: PaintOpacitySnapshot = [];
+  private _targetPaint: PaintOpacitySnapshot = [];
 
   /** Transform-time subpath lengths override for compound paths */
   private _alignedSubpathLengths?: number[];
@@ -59,8 +62,8 @@ export class FadeTransform extends Animation {
     this._startPoints = aligned.startPoints;
     this._targetPoints = aligned.targetPoints;
     this._alignedSubpathLengths = aligned.alignedSubpathLengths;
-    this._startOpacity = vmobject.opacity;
-    this._targetOpacity = this.target.opacity;
+    this._startPaint = capturePaintOpacity(vmobject);
+    this._targetPaint = capturePaintOpacity(this.target);
 
     vmobject.setPoints(this._startPoints);
     vmobject.setTransformSubpathLengths(this._alignedSubpathLengths);
@@ -79,10 +82,10 @@ export class FadeTransform extends Animation {
     // Fade effect: fade out in first half, fade in in second half
     if (alpha < 0.5) {
       // Fading out
-      vmobject.opacity = this._startOpacity * (1 - 2 * alpha);
+      applyPaintOpacitySnapshot(this._startPaint, this._startPaint, 1 - 2 * alpha);
     } else {
       // Fading in
-      vmobject.opacity = this._targetOpacity * (2 * alpha - 1);
+      applyPaintOpacitySnapshot(this._startPaint, this._targetPaint, 2 * alpha - 1);
     }
   }
 
@@ -90,9 +93,17 @@ export class FadeTransform extends Animation {
     const vmobject = this.mobject as VMobject;
     vmobject.setPoints(this._targetPoints);
     vmobject.setTransformSubpathLengths(undefined);
-    vmobject.opacity = this._targetOpacity;
-    vmobject.color = this.target.color;
+    applyPaintOpacitySnapshot(this._startPaint, this._targetPaint);
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._startPaint);
+  }
+
+  override getAllMobjects(): readonly VMobject[] {
+    return [this.mobject as VMobject, this.target];
   }
 }
 
@@ -128,10 +139,11 @@ export class FadeTransformPieces extends Animation {
   private _pieceStates: Array<{
     startPoints: number[][];
     targetPoints: number[][];
-    startOpacity: number;
-    targetOpacity: number;
+    startPaint: PaintOpacitySnapshot;
+    targetPaint: PaintOpacitySnapshot;
     alignedSubpathLengths?: number[];
   }> = [];
+  private _sourcePaint: PaintOpacitySnapshot = [];
 
   constructor(mobject: VMobject, target: VMobject, options: FadeTransformPiecesOptions = {}) {
     super(mobject, options);
@@ -144,6 +156,8 @@ export class FadeTransformPieces extends Animation {
     const source = this.mobject as VMobject;
     const sourceChildren = source.children as VMobject[];
     const targetChildren = this.target.children as VMobject[];
+    this._pieceStates = [];
+    this._sourcePaint = capturePaintOpacity(source);
 
     // Handle case where we have submobjects
     if (sourceChildren.length > 0 && targetChildren.length > 0) {
@@ -157,8 +171,8 @@ export class FadeTransformPieces extends Animation {
         this._pieceStates.push({
           startPoints: aligned.startPoints,
           targetPoints: aligned.targetPoints,
-          startOpacity: srcChild.opacity,
-          targetOpacity: tgtChild.opacity,
+          startPaint: capturePaintOpacity(srcChild),
+          targetPaint: capturePaintOpacity(tgtChild),
           alignedSubpathLengths: aligned.alignedSubpathLengths,
         });
       }
@@ -168,8 +182,8 @@ export class FadeTransformPieces extends Animation {
       this._pieceStates.push({
         startPoints: aligned.startPoints,
         targetPoints: aligned.targetPoints,
-        startOpacity: source.opacity,
-        targetOpacity: this.target.opacity,
+        startPaint: capturePaintOpacity(source),
+        targetPaint: capturePaintOpacity(this.target),
         alignedSubpathLengths: aligned.alignedSubpathLengths,
       });
     }
@@ -193,9 +207,9 @@ export class FadeTransformPieces extends Animation {
 
         // Fade effect
         if (alpha < 0.5) {
-          child.opacity = state.startOpacity * (1 - 2 * alpha);
+          applyPaintOpacitySnapshot(state.startPaint, state.startPaint, 1 - 2 * alpha);
         } else {
-          child.opacity = state.targetOpacity * (2 * alpha - 1);
+          applyPaintOpacitySnapshot(state.startPaint, state.targetPaint, 2 * alpha - 1);
         }
       }
     } else if (this._pieceStates.length > 0) {
@@ -209,9 +223,9 @@ export class FadeTransformPieces extends Animation {
       source.setTransformSubpathLengths(state.alignedSubpathLengths);
 
       if (alpha < 0.5) {
-        source.opacity = state.startOpacity * (1 - 2 * alpha);
+        applyPaintOpacitySnapshot(state.startPaint, state.startPaint, 1 - 2 * alpha);
       } else {
-        source.opacity = state.targetOpacity * (2 * alpha - 1);
+        applyPaintOpacitySnapshot(state.startPaint, state.targetPaint, 2 * alpha - 1);
       }
     }
   }
@@ -226,16 +240,26 @@ export class FadeTransformPieces extends Animation {
         const state = this._pieceStates[Math.min(i, this._pieceStates.length - 1)];
         child.setPoints(state.targetPoints);
         child.setTransformSubpathLengths(undefined);
-        child.opacity = state.targetOpacity;
+        applyPaintOpacitySnapshot(state.startPaint, state.targetPaint);
       }
     } else if (this._pieceStates.length > 0) {
       const state = this._pieceStates[0];
       source.setPoints(state.targetPoints);
       source.setTransformSubpathLengths(undefined);
-      source.opacity = state.targetOpacity;
+      applyPaintOpacitySnapshot(state.startPaint, state.targetPaint);
     }
 
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._sourcePaint);
+    this._pieceStates = [];
+  }
+
+  override getAllMobjects(): readonly VMobject[] {
+    return [this.mobject as VMobject, this.target];
   }
 }
 

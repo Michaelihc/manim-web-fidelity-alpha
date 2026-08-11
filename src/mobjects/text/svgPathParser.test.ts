@@ -397,6 +397,21 @@ describe('parseSVGPathData', () => {
       expectPointClose(result[0][3], [10, 0]);
     });
 
+    it('handles compact signed coordinates emitted by MathJax fonts', () => {
+      const result = parseSVGPathData('M36-148L20-148L20-194');
+      expectPointClose(result[0][0], [36, -148]);
+      expectPointClose(result[0][3], [20, -148]);
+      expectPointClose(result[0][6], [20, -194]);
+      expect(result.flat(2).every(Number.isFinite)).toBe(true);
+    });
+
+    it('keeps signed exponents distinct from adjacent signed coordinates', () => {
+      const result = parseSVGPathData('M1e-3-2.5L+.4-.6');
+      expectPointClose(result[0][0], [0.001, -2.5]);
+      expectPointClose(result[0][3], [0.4, -0.6]);
+      expect(result.flat(2).every(Number.isFinite)).toBe(true);
+    });
+
     it('handles multiple commands in compact sequence', () => {
       const result = parseSVGPathData('M0,0L5,0L5,5L0,5Z');
       expect(result).toHaveLength(1);
@@ -1020,6 +1035,30 @@ describe('svgToVMobjects', () => {
   });
 
   describe('scale() transforms on <g> elements', () => {
+    it('keeps MathJax underbrace extenders thin under anisotropic scale', () => {
+      // MathJax builds a wide underbrace from a 420x120 extender path. The
+      // horizontal scale must not leak into Y or the brace becomes an opaque
+      // rectangle over the expression.
+      const svg = createSVG(
+        '<svg>' +
+          '<g transform="scale(1,-1)">' +
+          '<path d="M-10 0L410 0L410 120L-10 120Z" transform="scale(13.039,1)"/>' +
+          '</g>' +
+          '</svg>',
+      );
+
+      const group = svgToVMobjects(svg, { flipY: true, scale: 1 });
+      const points = (group.submobjects[0] as any).getLocalPoints() as number[][];
+      const xs = points.map((point) => point[0]);
+      const ys = points.map((point) => point[1]);
+      const width = Math.max(...xs) - Math.min(...xs);
+      const height = Math.max(...ys) - Math.min(...ys);
+
+      expect(width).toBeCloseTo(420 * 13.039, 5);
+      expect(height).toBeCloseTo(120, 5);
+      expect(width / height).toBeGreaterThan(40);
+    });
+
     it('should scale path coordinates by <g> scale factor', () => {
       // Path point (100, 0) inside scale(0.5) should produce half-size coordinates
       const svg = createSVG(

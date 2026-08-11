@@ -96,6 +96,11 @@ export class ThreeDScene extends Scene {
   // Fixed-orientation mobjects (stay in 3D world but always face the camera)
   private _fixedOrientationMobjects: Set<Mobject> = new Set();
 
+  // Explicit foreground remains a render-order override in 3D, while ordinary
+  // mobjects stay at renderOrder 0 for camera/depth sorting.
+  private _foregroundRenderOrders: Map<Mobject, number> = new Map();
+  private _nextForegroundRenderOrder: number = 10000;
+
   // Ambient camera rotation
   private _ambientRotationRate: number = 0;
   private _lastRenderTime: number = 0;
@@ -107,6 +112,14 @@ export class ThreeDScene extends Scene {
   private _illusionThetaTracker: number = 0;
   private _illusionPhiTracker: number = 0;
   private _illusionActive: boolean = false;
+
+  /**
+   * 3D scenes retain Three.js camera/depth sorting rather than the base
+   * scene's 2D painter-order ranking and material normalization.
+   */
+  protected override get _uses2DPainterOrdering(): boolean {
+    return false;
+  }
 
   /**
    * Create a new 3D scene.
@@ -209,8 +222,8 @@ export class ThreeDScene extends Scene {
    *  - depthWrite=!transparent (transparent meshes must not occlude later
    *    transparent fragments behind them)
    *  - renderOrder reset to 0 so Three.js sorts transparent objects by camera
-   *    distance instead of add order (base Scene stamps an incrementing
-   *    renderOrder for 2D z-ordering, which defeats 3D depth sort)
+   *    distance instead of painter order (the `_uses2DPainterOrdering` gate
+   *    also keeps the base Scene ranking pass disabled)
    *
    * Auto-render is suppressed inside super.add() and scheduled once at the end,
    * after settings are applied, so the first visible frame is correct.
@@ -254,11 +267,50 @@ export class ThreeDScene extends Scene {
   }
 
   /**
+   * Preserve ThreeDScene's explicit foreground override without enabling the
+   * base scene's general 2D z-index ranking.
+   */
+  override addForegroundMobject(...mobjects: Mobject[]): this {
+    super.addForegroundMobject(...mobjects);
+    for (const mobject of mobjects) {
+      let renderOrder = this._foregroundRenderOrders.get(mobject);
+      if (renderOrder === undefined) {
+        renderOrder = this._nextForegroundRenderOrder++;
+        this._foregroundRenderOrders.set(mobject, renderOrder);
+      }
+      ThreeDScene._applyRenderOrder(mobject, renderOrder);
+    }
+    return this;
+  }
+
+  private static _applyRenderOrder(mobject: Mobject, renderOrder: number): void {
+    mobject.getThreeObject().traverse((object) => {
+      object.renderOrder = renderOrder;
+    });
+  }
+
+  /**
    * Apply 3D-correct material defaults: depthTest=true,
    * depthWrite=!transparent, and (on initial add only) renderOrder=0 so
    * Three.js sorts transparents by camera distance.
    */
   private static _applyDepthSettings(mob: Mobject, resetRenderOrder = false): void {
+    // A mobject may have previously lived in a 2D Scene, where all materials
+    // are normalized into one transparent painter queue. Restore their source
+    // flags before the dirty sync recomputes any logical opacity state.
+    mob._threeObject?.traverse((object) => {
+      const material = (
+        object as THREE.Object3D & {
+          material?: THREE.Material | THREE.Material[];
+        }
+      ).material;
+      if (!material) return;
+      for (const item of Array.isArray(material) ? material : [material]) {
+        ThreeDScene._restoreMaterialAfter2D(item);
+      }
+    });
+
+    mob._syncToThree();
     mob.getThreeObject().traverse((c) => {
       if (resetRenderOrder) c.renderOrder = 0;
       const mat = (c as THREE.Mesh).material;
@@ -679,6 +731,11 @@ export class ThreeDScene extends Scene {
     };
     for (const mob of this.mobjects) syncDirty(mob);
     if (this._fixedMobjects) for (const mob of this._fixedMobjects) syncDirty(mob);
+    if (this._foregroundRenderOrders) {
+      for (const [mob, renderOrder] of this._foregroundRenderOrders) {
+        if (this.mobjects.has(mob)) ThreeDScene._applyRenderOrder(mob, renderOrder);
+      }
+    }
 
     // Apply billboard rotation to fixed-orientation mobjects around their
     // current world center. We can't just set `quaternion = camQuat` on the
@@ -763,6 +820,8 @@ export class ThreeDScene extends Scene {
     }
     this._fixedOrientationMobjects.clear();
     this._pendingFixedMode.clear();
+    this._foregroundRenderOrders.clear();
+    this._nextForegroundRenderOrder = 10000;
 
     // Clear any remaining HUD scene children
     while (this._hudScene.children.length > 0) {
@@ -784,6 +843,7 @@ export class ThreeDScene extends Scene {
    */
   remove(...mobjects: Mobject[]): this {
     for (const mob of mobjects) {
+      this._foregroundRenderOrders.delete(mob);
       this._pendingFixedMode.delete(mob);
       if (this._fixedMobjects.has(mob)) {
         this._fixedMobjects.delete(mob);

@@ -11,6 +11,9 @@ import {
 } from './ArcShapes';
 import { Arc } from './Arc';
 import { BLUE } from '../../constants';
+import { ArrowTriangleFilledTip } from './ArrowTips';
+import { Create } from '../../animation/creation/Create';
+import { linear } from '../../rate-functions';
 
 // ---------------------------------------------------------------------------
 // Ellipse
@@ -292,6 +295,64 @@ describe('CurvedArrow', () => {
     const ca = new CurvedArrow();
     expect(ca.numPoints).toBeGreaterThan(0);
   });
+
+  it('renders an unfilled shaft and a separate filled tip', () => {
+    const ca = new CurvedArrow({
+      startPoint: [-2, 0, 0],
+      endPoint: [2, 0, 0],
+      angle: Math.PI / 2,
+    });
+    const tip = ca.children[0];
+
+    expect(ca.fillOpacity).toBe(0);
+    expect(ca.children).toHaveLength(1);
+    expect(tip).toBeInstanceOf(ArrowTriangleFilledTip);
+    expect(tip.fillOpacity).toBe(1);
+    expect(tip.strokeWidth).toBe(0);
+    expect(ca.getLocalPoints()[0]).toEqual([-2, 0, 0]);
+    expect(tip.getLocalPoints()[3]).toEqual([2, 0, 0]);
+    expect(ca.getLocalPoints().every(([x]) => x >= -2.001 && x <= 2.001)).toBe(true);
+
+    // A fill mesh directly under the root would triangulate the open arc into
+    // the large wedge this regression guards against. Only the tip subtree may
+    // contain a fill mesh.
+    const rootThree = ca.getThreeObject();
+    expect(rootThree.children.some((child) => child.type === 'Mesh')).toBe(false);
+    let tipMeshCount = 0;
+    tip.getThreeObject().traverse((child) => {
+      if (child.type === 'Mesh') tipMeshCount += 1;
+    });
+    expect(tipMeshCount).toBe(1);
+
+    ca.setFillOpacity(0.4);
+    expect(ca.fillOpacity).toBe(0);
+    expect(tip.fillOpacity).toBeCloseTo(0.4);
+  });
+
+  it('supports Create without merging or losing shaft/tip geometry', () => {
+    const ca = new CurvedArrow({
+      startPoint: [-2, -0.5, 0],
+      endPoint: [2, 0.5, 0],
+      angle: -Math.PI / 2,
+    });
+    const originalShaft = ca.getLocalPoints();
+    const originalTip = ca.children[0].getLocalPoints();
+    const animation = new Create(ca, { lagRatio: 0, rateFunc: linear });
+
+    animation.begin();
+    animation.interpolate(0.35);
+    expect(ca.fillOpacity).toBe(0);
+    expect(ca.getLocalPoints()).not.toEqual(originalShaft);
+    expect(ca.children[0].getLocalPoints()).not.toEqual(originalTip);
+
+    animation.finish();
+    expect(ca.getLocalPoints()).toEqual(originalShaft);
+    expect(ca.children[0].getLocalPoints()).toEqual(originalTip);
+
+    animation.reset();
+    expect(ca.getLocalPoints()).toEqual(originalShaft);
+    expect(ca.children[0].getLocalPoints()).toEqual(originalTip);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -318,6 +379,50 @@ describe('CurvedDoubleArrow', () => {
   it('generates non-empty points', () => {
     const cda = new CurvedDoubleArrow();
     expect(cda.numPoints).toBeGreaterThan(0);
+  });
+
+  it('keeps its open shaft separate from both filled tips', () => {
+    const cda = new CurvedDoubleArrow({
+      startPoint: [-2, 0, 0],
+      endPoint: [2, 0, 0],
+      angle: Math.PI / 2,
+    });
+
+    expect(cda.fillOpacity).toBe(0);
+    expect(cda.children).toHaveLength(2);
+    expect(cda.children.every((tip) => tip instanceof ArrowTriangleFilledTip)).toBe(true);
+    expect(cda.children.every((tip) => tip.fillOpacity === 1 && tip.strokeWidth === 0)).toBe(true);
+    expect(cda.children[0].getLocalPoints()[3]).toEqual([-2, 0, 0]);
+    expect(cda.children[1].getLocalPoints()[3]).toEqual([2, 0, 0]);
+    expect(cda.getLocalPoints().every(([x]) => x >= -2.001 && x <= 2.001)).toBe(true);
+
+    const rootThree = cda.getThreeObject();
+    expect(rootThree.children.some((child) => child.type === 'Mesh')).toBe(false);
+    cda.setFillOpacity(0.25);
+    expect(cda.fillOpacity).toBe(0);
+    expect(cda.children.every((tip) => tip.fillOpacity === 0.25)).toBe(true);
+  });
+
+  it('supports Create across the shaft and both independent tips', () => {
+    const cda = new CurvedDoubleArrow({
+      startPoint: [-2, 0, 0],
+      endPoint: [2, 0, 0],
+      angle: -Math.PI / 2,
+    });
+    const originalShaft = cda.getLocalPoints();
+    const originalTips = cda.children.map((tip) => tip.getLocalPoints());
+    const animation = new Create(cda, { lagRatio: 0, rateFunc: linear });
+
+    animation.begin();
+    animation.interpolate(0.35);
+    expect(cda.fillOpacity).toBe(0);
+    expect(cda.getLocalPoints()).not.toEqual(originalShaft);
+    expect(cda.children[0].getLocalPoints()).not.toEqual(originalTips[0]);
+    expect(cda.children[1].getLocalPoints()).not.toEqual(originalTips[1]);
+
+    animation.finish();
+    expect(cda.getLocalPoints()).toEqual(originalShaft);
+    expect(cda.children.map((tip) => tip.getLocalPoints())).toEqual(originalTips);
   });
 });
 

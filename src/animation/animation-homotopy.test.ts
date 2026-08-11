@@ -226,10 +226,10 @@ describe('ShowPassingFlash', () => {
       expect(anim.timeWidth).toBe(0.2);
     });
 
-    it('flashStrokeWidth defaults to DEFAULT_STROKE_WIDTH * 1.5', () => {
-      const anim = new ShowPassingFlash(makeMobject());
-      // DEFAULT_STROKE_WIDTH is 4 in constants
-      expect(anim.flashStrokeWidth).toBeCloseTo(6, 1);
+    it('preserves the source stroke width by default', () => {
+      const mobject = makeMobject();
+      const anim = new ShowPassingFlash(mobject);
+      expect(anim.flashStrokeWidth).toBe(mobject.strokeWidth);
     });
   });
 

@@ -9,6 +9,12 @@ import { Mobject, Vector3Tuple } from '../../core/Mobject';
 import { Animation, AnimationOptions } from '../Animation';
 import { lerp, lerpPoint } from '../../utils/math';
 import { alignVmobjectPair } from './TransformPairing';
+import {
+  capturePaintOpacity,
+  interpolatePaintOpacity,
+  restorePaintOpacity,
+  type PaintOpacitySnapshot,
+} from './PaintOpacity';
 
 // ============================================================================
 // ClockwiseTransform
@@ -39,9 +45,8 @@ export class ClockwiseTransform extends Animation {
   /** Center of rotation */
   private _center: Vector3Tuple = [0, 0, 0];
 
-  /** Starting style values */
-  private _startOpacity: number = 1;
-  private _targetOpacity: number = 1;
+  private _startPaint: PaintOpacitySnapshot = [];
+  private _targetPaint: PaintOpacitySnapshot = [];
 
   constructor(mobject: VMobject, target: VMobject, options: ClockwiseTransformOptions = {}) {
     super(mobject, options);
@@ -68,8 +73,8 @@ export class ClockwiseTransform extends Animation {
       (srcCenter[2] + tgtCenter[2]) / 2,
     ];
 
-    this._startOpacity = vmobject.opacity;
-    this._targetOpacity = this.target.opacity;
+    this._startPaint = capturePaintOpacity(vmobject);
+    this._targetPaint = capturePaintOpacity(this.target);
 
     vmobject.setPoints(this._startPoints);
   }
@@ -105,16 +110,24 @@ export class ClockwiseTransform extends Animation {
     }
 
     vmobject.setPoints(interpolatedPoints);
-    vmobject.opacity = lerp(this._startOpacity, this._targetOpacity, alpha);
+    interpolatePaintOpacity(this._startPaint, this._targetPaint, alpha);
   }
 
   override finish(): void {
     const vmobject = this.mobject as VMobject;
     vmobject.setPoints(this._targetPoints);
     vmobject.setTransformSubpathLengths(undefined);
-    vmobject.opacity = this._targetOpacity;
-    vmobject.color = this.target.color;
+    interpolatePaintOpacity(this._startPaint, this._targetPaint, 1);
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._startPaint);
+  }
+
+  override getAllMobjects(): readonly VMobject[] {
+    return [this.mobject as VMobject, this.target];
   }
 }
 
@@ -161,9 +174,8 @@ export class CounterclockwiseTransform extends Animation {
   /** Center of rotation */
   private _center: Vector3Tuple = [0, 0, 0];
 
-  /** Starting style values */
-  private _startOpacity: number = 1;
-  private _targetOpacity: number = 1;
+  private _startPaint: PaintOpacitySnapshot = [];
+  private _targetPaint: PaintOpacitySnapshot = [];
 
   constructor(mobject: VMobject, target: VMobject, options: CounterclockwiseTransformOptions = {}) {
     super(mobject, options);
@@ -189,8 +201,8 @@ export class CounterclockwiseTransform extends Animation {
       (srcCenter[2] + tgtCenter[2]) / 2,
     ];
 
-    this._startOpacity = vmobject.opacity;
-    this._targetOpacity = this.target.opacity;
+    this._startPaint = capturePaintOpacity(vmobject);
+    this._targetPaint = capturePaintOpacity(this.target);
 
     vmobject.setPoints(this._startPoints);
   }
@@ -223,16 +235,24 @@ export class CounterclockwiseTransform extends Animation {
     }
 
     vmobject.setPoints(interpolatedPoints);
-    vmobject.opacity = lerp(this._startOpacity, this._targetOpacity, alpha);
+    interpolatePaintOpacity(this._startPaint, this._targetPaint, alpha);
   }
 
   override finish(): void {
     const vmobject = this.mobject as VMobject;
     vmobject.setPoints(this._targetPoints);
     vmobject.setTransformSubpathLengths(undefined);
-    vmobject.opacity = this._targetOpacity;
-    vmobject.color = this.target.color;
+    interpolatePaintOpacity(this._startPaint, this._targetPaint, 1);
     super.finish();
+  }
+
+  override reset(): void {
+    super.reset();
+    restorePaintOpacity(this._startPaint);
+  }
+
+  override getAllMobjects(): readonly VMobject[] {
+    return [this.mobject as VMobject, this.target];
   }
 }
 

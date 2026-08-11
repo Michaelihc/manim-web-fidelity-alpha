@@ -44,6 +44,15 @@ export abstract class VMobjectRendering extends Mobject {
   /** Tracks whether opacity was fully opaque last sync (for corner-wrap rebuild) */
   private _wasOpaque: boolean = true;
 
+  /**
+   * Tracks the zero/non-zero fill boundary.
+   *
+   * Fill geometry is physically removed at zero opacity. A later FadeIn must
+   * therefore rebuild it as soon as opacity becomes non-zero, not only when
+   * stroke opacity reaches 1 at the end of the animation.
+   */
+  private _wasFillVisible: boolean = false;
+
   /** Cached Line2 for in-place geometry updates (avoids dispose/recreate) */
   private _cachedLine2: Line2 | null = null;
 
@@ -242,7 +251,7 @@ export abstract class VMobjectRendering extends Mobject {
       color: new THREE.Color(this._style.fillColor || this.color),
       transparent: true,
       depthWrite: false,
-      opacity: this._opacity * this.fillOpacity,
+      opacity: this.fillOpacity,
       side: THREE.DoubleSide,
     });
 
@@ -590,7 +599,7 @@ export abstract class VMobjectRendering extends Mobject {
 
     if (this._fillMaterial) {
       this._fillMaterial.color.set(this._style.fillColor || this.color);
-      this._fillMaterial.opacity = this._opacity * this.fillOpacity;
+      this._fillMaterial.opacity = this.fillOpacity;
     }
 
     if (this._strokeMeshMaterial) {
@@ -612,6 +621,12 @@ export abstract class VMobjectRendering extends Mobject {
     if (isOpaque !== this._wasOpaque) {
       this._geometryDirty = true;
       this._wasOpaque = isOpaque;
+    }
+
+    const isFillVisible = this.fillOpacity > 0;
+    if (isFillVisible !== this._wasFillVisible) {
+      this._geometryDirty = true;
+      this._wasFillVisible = isFillVisible;
     }
 
     if (this._geometryDirty && this._threeObject instanceof THREE.Group) {

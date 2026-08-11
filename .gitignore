@@ -22,3 +22,11 @@ test-results/
 thoughts/
 .claude
 .desloppify/
+renders/
+
+# Local fidelity source media. Code and timing data remain public, but media
+# must be supplied by each user under their own redistribution rights.
+examples/esap-review/assets/audio/*
+!examples/esap-review/assets/audio/.gitkeep
+examples/esap-review/reference/*
+!examples/esap-review/reference/README.md

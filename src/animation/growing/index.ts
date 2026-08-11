@@ -19,13 +19,10 @@ export type GrowArrowOptions = AnimationOptions;
  * GrowArrow animation - interpolate arrow from a start-growth state to end state.
  */
 export class GrowArrow extends Animation {
-  private _start = new THREE.Vector3();
-  private _endShaftPos = new THREE.Vector3();
-  private _endTipPos = new THREE.Vector3();
-  private _endShaftScale = new THREE.Vector3();
-  private _endTipScale = new THREE.Vector3();
-  private _endShaftCenter = new THREE.Vector3();
-  private _endTipCenter = new THREE.Vector3();
+  private _startPosition = new THREE.Vector3();
+  private _startScale = new THREE.Vector3();
+  private _targetPosition = new THREE.Vector3();
+  private _targetScale = new THREE.Vector3();
 
   constructor(mobject: Arrow, options: GrowArrowOptions = {}) {
     super(mobject, options);
@@ -35,83 +32,31 @@ export class GrowArrow extends Animation {
     super.begin();
 
     const arrow = this.mobject as Arrow;
-    const shaft = arrow.children[0];
-    const tip = arrow.children[1];
-    if (!shaft || !tip) throw new Error('GrowArrow requires Arrow to have shaft and tip children');
+    this._targetPosition.copy(arrow.position);
+    this._targetScale.copy(arrow.scaleVector);
 
-    const [sx, sy, sz] = arrow.getStart();
-    this._start.set(sx, sy, sz);
-    this._endShaftPos.copy(shaft.position);
-    this._endTipPos.copy(tip.position);
-    this._endShaftScale.copy(shaft.scaleVector);
-    this._endTipScale.copy(tip.scaleVector);
-
-    {
-      const c = shaft.getCenter();
-      this._endShaftCenter.set(c[0], c[1], c[2]);
-    }
-    {
-      const c = tip.getCenter();
-      this._endTipCenter.set(c[0], c[1], c[2]);
-    }
-
+    // Manim constructs GrowArrow's starting mobject by scaling the complete
+    // arrow (shaft and tip) to zero about its start point. Capturing that
+    // collapsed root transform keeps both parts on the same affine trajectory
+    // and also remains correct when the arrow is nested under another transform.
+    arrow.scale(0, { aboutPoint: arrow.getStart() });
+    this._startPosition.copy(arrow.position);
+    this._startScale.copy(arrow.scaleVector);
     this.interpolate(0);
   }
 
   interpolate(alpha: number): void {
     const arrow = this.mobject as Arrow;
-    const shaft = arrow.children[0];
-    const tip = arrow.children[1];
-    if (!shaft || !tip) throw new Error('GrowArrow requires Arrow to have shaft and tip children');
-
-    const s = alpha;
-
-    shaft.scaleVector.set(
-      this._endShaftScale.x * s,
-      this._endShaftScale.y * s,
-      this._endShaftScale.z * s,
-    );
-    tip.scaleVector.set(this._endTipScale.x * s, this._endTipScale.y * s, this._endTipScale.z * s);
-
-    const shaftTargetCenter = new THREE.Vector3().lerpVectors(
-      this._start,
-      this._endShaftCenter,
-      alpha,
-    );
-    {
-      const c = shaft.getCenter();
-      shaft.shift([
-        shaftTargetCenter.x - c[0],
-        shaftTargetCenter.y - c[1],
-        shaftTargetCenter.z - c[2],
-      ]);
-    }
-
-    const tipTargetCenter = new THREE.Vector3().lerpVectors(this._start, this._endTipCenter, alpha);
-    {
-      const c = tip.getCenter();
-      tip.shift([tipTargetCenter.x - c[0], tipTargetCenter.y - c[1], tipTargetCenter.z - c[2]]);
-    }
-
-    shaft._markDirty();
-    tip._markDirty();
-    this.mobject._markDirty();
+    arrow.position.lerpVectors(this._startPosition, this._targetPosition, alpha);
+    arrow.scaleVector.lerpVectors(this._startScale, this._targetScale, alpha);
+    arrow._markDirty();
   }
 
   override finish(): void {
     const arrow = this.mobject as Arrow;
-    const shaft = arrow.children[0];
-    const tip = arrow.children[1];
-    if (!shaft || !tip) throw new Error('GrowArrow requires Arrow to have shaft and tip children');
-
-    shaft.position.copy(this._endShaftPos);
-    tip.position.copy(this._endTipPos);
-    shaft.scaleVector.copy(this._endShaftScale);
-    tip.scaleVector.copy(this._endTipScale);
-
-    shaft._markDirty();
-    tip._markDirty();
-    this.mobject._markDirty();
+    arrow.position.copy(this._targetPosition);
+    arrow.scaleVector.copy(this._targetScale);
+    arrow._markDirty();
     super.finish();
   }
 }

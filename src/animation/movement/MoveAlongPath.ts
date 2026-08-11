@@ -2,7 +2,6 @@
  * MoveAlongPath animation - moves a mobject along a path defined by a VMobject.
  */
 
-import * as THREE from 'three';
 import { Mobject } from '../../core/Mobject';
 import { VMobject } from '../../core/VMobject';
 import { Animation, AnimationOptions } from '../Animation';
@@ -14,56 +13,6 @@ export interface MoveAlongPathOptions extends AnimationOptions {
   rotateAlongPath?: boolean;
 }
 
-/**
- * Helper to evaluate a cubic Bezier curve at parameter t
- */
-function evaluateCubicBezier(
-  p0: number[],
-  p1: number[],
-  p2: number[],
-  p3: number[],
-  t: number,
-): number[] {
-  const oneMinusT = 1 - t;
-  const oneMinusT2 = oneMinusT * oneMinusT;
-  const oneMinusT3 = oneMinusT2 * oneMinusT;
-  const t2 = t * t;
-  const t3 = t2 * t;
-
-  return [
-    oneMinusT3 * p0[0] + 3 * oneMinusT2 * t * p1[0] + 3 * oneMinusT * t2 * p2[0] + t3 * p3[0],
-    oneMinusT3 * p0[1] + 3 * oneMinusT2 * t * p1[1] + 3 * oneMinusT * t2 * p2[1] + t3 * p3[1],
-    oneMinusT3 * p0[2] + 3 * oneMinusT2 * t * p1[2] + 3 * oneMinusT * t2 * p2[2] + t3 * p3[2],
-  ];
-}
-
-/**
- * Helper to evaluate the derivative of a cubic Bezier curve at parameter t
- */
-function evaluateCubicBezierDerivative(
-  p0: number[],
-  p1: number[],
-  p2: number[],
-  p3: number[],
-  t: number,
-): number[] {
-  const oneMinusT = 1 - t;
-  const oneMinusT2 = oneMinusT * oneMinusT;
-  const t2 = t * t;
-
-  return [
-    3 * oneMinusT2 * (p1[0] - p0[0]) +
-      6 * oneMinusT * t * (p2[0] - p1[0]) +
-      3 * t2 * (p3[0] - p2[0]),
-    3 * oneMinusT2 * (p1[1] - p0[1]) +
-      6 * oneMinusT * t * (p2[1] - p1[1]) +
-      3 * t2 * (p3[1] - p2[1]),
-    3 * oneMinusT2 * (p1[2] - p0[2]) +
-      6 * oneMinusT * t * (p2[2] - p1[2]) +
-      3 * t2 * (p3[2] - p2[2]),
-  ];
-}
-
 export class MoveAlongPath extends Animation {
   /** The path to follow */
   readonly path: VMobject;
@@ -71,14 +20,8 @@ export class MoveAlongPath extends Animation {
   /** Whether to orient tangent to the path */
   readonly rotateAlongPath: boolean;
 
-  /** Path points (Bezier control points) */
-  private _pathPoints: number[][] = [];
-
-  /** Number of curve segments */
-  private _numSegments: number = 0;
-
-  /** Initial rotation */
-  private _initialRotation: THREE.Euler = new THREE.Euler();
+  /** Whether the path contains at least one cubic segment. */
+  private _hasPath: boolean = false;
 
   /** Offset from mobject.position to mobject.getCenter() (accounts for geometry offset, e.g. Dot) */
   private _centerOffset: number[] = [0, 0, 0];
@@ -95,24 +38,7 @@ export class MoveAlongPath extends Animation {
   override begin(): void {
     super.begin();
 
-    // Get path points in WORLD space: the moving mobject's position is set to
-    // these samples, so a path that carries its own transform (e.g. a Circle
-    // shifted/scaled away from the origin) must be followed at its real location.
-    // getLocalPoints() would orbit the path's untransformed origin instead.
-    this._pathPoints = this.path.getPoints();
-
-    // Calculate number of cubic Bezier segments
-    // Points are: anchor1, handle1, handle2, anchor2, handle3, handle4, anchor3, ...
-    // Each segment uses 4 points, subsequent segments share anchors
-    // So n points gives (n - 1) / 3 segments
-    if (this._pathPoints.length >= 4) {
-      this._numSegments = Math.floor((this._pathPoints.length - 1) / 3);
-    } else {
-      this._numSegments = 0;
-    }
-
-    // Store initial rotation
-    this._initialRotation.copy(this.mobject.rotation);
+    this._hasPath = this.path.getLocalPoints().length >= 4;
 
     // Calculate offset between mobject's center and its position.
     // Mobjects like Dot have internal geometry offset from their position,
@@ -130,7 +56,7 @@ export class MoveAlongPath extends Animation {
    * Get position and tangent at alpha (0 to 1) along the path
    */
   private _getPositionAndTangent(alpha: number): { position: number[]; tangent: number[] } {
-    if (this._numSegments === 0 || this._pathPoints.length < 4) {
+    if (!this._hasPath) {
       // No valid path, stay at current position
       const pos = this.mobject.position;
       return {
@@ -139,23 +65,12 @@ export class MoveAlongPath extends Animation {
       };
     }
 
-    // Clamp alpha
-    alpha = Math.max(0, Math.min(1, alpha));
-
-    // Map alpha to segment and local t
-    const totalProgress = alpha * this._numSegments;
-    const segmentIndex = Math.min(Math.floor(totalProgress), this._numSegments - 1);
-    const localT = totalProgress - segmentIndex;
-
-    // Get the 4 control points for this segment
-    const baseIndex = segmentIndex * 3;
-    const p0 = this._pathPoints[baseIndex];
-    const p1 = this._pathPoints[baseIndex + 1];
-    const p2 = this._pathPoints[baseIndex + 2];
-    const p3 = this._pathPoints[baseIndex + 3];
-
-    const position = evaluateCubicBezier(p0, p1, p2, p3, localT);
-    const tangent = evaluateCubicBezierDerivative(p0, p1, p2, p3, localT);
+    const clampedAlpha = Math.max(0, Math.min(1, alpha));
+    const position = this.path.pointFromProportion(clampedAlpha);
+    const epsilon = 1e-4;
+    const before = this.path.pointFromProportion(Math.max(0, clampedAlpha - epsilon));
+    const after = this.path.pointFromProportion(Math.min(1, clampedAlpha + epsilon));
+    const tangent = [after[0] - before[0], after[1] - before[1], after[2] - before[2]];
 
     return { position, tangent };
   }
@@ -177,15 +92,11 @@ export class MoveAlongPath extends Animation {
 
     // Optionally set rotation to tangent direction
     if (this.rotateAlongPath) {
-      const tangentVec = new THREE.Vector3(tangent[0], tangent[1], tangent[2]);
-      const length = tangentVec.length();
+      const length = Math.hypot(tangent[0], tangent[1], tangent[2]);
 
       if (length > 0.0001) {
-        tangentVec.normalize();
-
         // Calculate rotation to align with tangent
-        // We'll rotate around Z axis for 2D paths, or use full 3D rotation
-        const angle = Math.atan2(tangentVec.y, tangentVec.x);
+        const angle = Math.atan2(tangent[1], tangent[0]);
         this.mobject.rotation.set(0, 0, angle);
       }
     }

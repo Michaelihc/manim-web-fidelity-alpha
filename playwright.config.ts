@@ -20,7 +20,9 @@ export default defineConfig({
   ],
   webServer: {
     command: 'npm run dev',
-    url: 'http://localhost:5173',
+    // This repository is a Vite MPA: `/` intentionally has no index and
+    // returns 404, so probe the actual ESAP entrypoint for readiness.
+    url: 'http://localhost:5173/examples/esap_review.html',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

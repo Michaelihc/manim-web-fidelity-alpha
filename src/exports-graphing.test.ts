@@ -1,12 +1,7 @@
-import { beforeAll, describe, it, expect } from 'vitest';
-
-let mod: typeof import('./index');
+import { describe, it, expect } from 'vitest';
+import * as mod from './index';
 
 describe('Issue #131: Missing graphing exports from main index', () => {
-  beforeAll(async () => {
-    mod = await import('./index');
-  }, 60000);
-
   it('should export VectorField from main index', () => {
     expect(mod.VectorField).toBeDefined();
   });

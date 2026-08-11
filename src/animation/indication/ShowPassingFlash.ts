@@ -1,214 +1,180 @@
 /**
- * ShowPassingFlash animation - creates a flash of light traveling along a path.
+ * Show a fixed-width window traveling over a VMobject's actual Bézier path.
  *
- * This mimics Manim's ShowPassingFlash animation, which shows a highlighted
- * portion of a VMobject's stroke traveling along its path.
+ * The previous implementation sampled control points into a detached Three.js
+ * line.  Besides making the speed depend on point density, that lost parent
+ * transforms and joined compound contours.  Manim's implementation is a
+ * partial-path animation, so keep the operation in VMobject geometry instead.
  */
 
-import * as THREE from 'three';
-import { Line2 } from 'three/examples/jsm/lines/Line2.js';
-import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
-import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { Mobject } from '../../core/Mobject';
+import { VGroup } from '../../core/VGroup';
 import { VMobject } from '../../core/VMobject';
-import { Animation, AnimationOptions } from '../Animation';
+import { Animation, type AnimationOptions } from '../Animation';
 import { linear } from '../../rate-functions';
-import { YELLOW, DEFAULT_STROKE_WIDTH } from '../../constants';
-import { evalCubicBezier } from '../../utils/math';
 
 export interface ShowPassingFlashOptions extends AnimationOptions {
-  /** Color of the flash. Default: YELLOW */
+  /** Optional stroke color override. By default the source stroke is preserved. */
   color?: string;
-  /** Width of the flash as a proportion of the path (0-1). Default: 0.2 */
+  /** Width of the moving window as a proportion of the full path. Default: 0.2. */
   timeWidth?: number;
-  /** Stroke width of the flash. Default: DEFAULT_STROKE_WIDTH * 1.5 */
+  /** Optional stroke-width override. By default the source width is preserved. */
   strokeWidth?: number;
 }
 
+export interface PassingFlashPart {
+  readonly mobject: VMobject;
+  readonly source: VMobject;
+  readonly color: string;
+  readonly fillColor: string;
+  readonly fillOpacity: number;
+  readonly strokeColor: string;
+  readonly strokeOpacity: number;
+  readonly strokeWidth: number;
+  readonly transformSubpathLengths: number[] | undefined;
+}
+
 export class ShowPassingFlash extends Animation {
-  /** Flash color */
+  /** Color override, or the root's stroke color when no override was supplied. */
   readonly flashColor: string;
 
-  /** Width of flash as proportion of path */
+  /** Width of the moving path interval. */
   readonly timeWidth: number;
 
-  /** Flash stroke width */
+  /** Stroke-width override, or the root's current stroke width. */
   readonly flashStrokeWidth: number;
 
-  /** Flash line group */
-  protected _flashGroup: THREE.Group | null = null;
-
-  /** Parent object */
-  protected _parentObject: THREE.Object3D | null = null;
-
-  /** Path points (sampled from VMobject) */
-  protected _pathPoints: number[][] = [];
-
-  /** Whether mobject is a VMobject */
-  protected _isVMobject: boolean = false;
+  protected readonly _hasColorOverride: boolean;
+  protected readonly _hasStrokeWidthOverride: boolean;
+  protected _parts: PassingFlashPart[] = [];
+  private _fallbackOpacity = 1;
 
   constructor(mobject: Mobject, options: ShowPassingFlashOptions = {}) {
     super(mobject, {
       duration: options.duration ?? 1,
       rateFunc: options.rateFunc ?? linear,
     });
-    this.flashColor = options.color ?? YELLOW;
-    this.timeWidth = options.timeWidth ?? 0.2;
-    this.flashStrokeWidth = options.strokeWidth ?? DEFAULT_STROKE_WIDTH * 1.5;
-    this._isVMobject = mobject instanceof VMobject;
+
+    const timeWidth = options.timeWidth ?? 0.2;
+    if (!Number.isFinite(timeWidth) || timeWidth < 0 || timeWidth > 1) {
+      throw new RangeError(`ShowPassingFlash timeWidth must be in [0, 1], got ${timeWidth}.`);
+    }
+
+    this.timeWidth = timeWidth;
+    this._hasColorOverride = options.color !== undefined;
+    this._hasStrokeWidthOverride = options.strokeWidth !== undefined;
+    this.flashColor = options.color ?? mobject.strokeColor ?? mobject.color;
+    this.flashStrokeWidth = options.strokeWidth ?? mobject.strokeWidth;
+    this.remover = true;
   }
 
   override begin(): void {
+    this._restoreParts();
+    this._parts = [];
     super.begin();
 
-    const threeObj = this.mobject.getThreeObject();
-    this._parentObject = threeObj.parent ?? threeObj;
-
-    // Get path points from VMobject or use bounding box
-    if (this._isVMobject) {
-      const vmob = this.mobject as VMobject;
-      this._pathPoints = vmob.getLocalPoints();
-
-      // Sample Bezier path for smoother flash
-      this._pathPoints = this._samplePath(this._pathPoints);
-    } else {
-      // For non-VMobjects, create a simple path around bounding box
-      const center = this.mobject.getCenter();
-      const box = new THREE.Box3().setFromObject(threeObj);
-      const size = new THREE.Vector3();
-      box.getSize(size);
-      const hw = size.x / 2;
-      const hh = size.y / 2;
-
-      this._pathPoints = [
-        [center[0] - hw, center[1] + hh, center[2]],
-        [center[0] + hw, center[1] + hh, center[2]],
-        [center[0] + hw, center[1] - hh, center[2]],
-        [center[0] - hw, center[1] - hh, center[2]],
-        [center[0] - hw, center[1] + hh, center[2]],
-      ];
-    }
-
-    // Create flash group
-    this._flashGroup = new THREE.Group();
-    this._parentObject.add(this._flashGroup);
-  }
-
-  protected _samplePath(points: number[][]): number[][] {
-    if (points.length < 4) return points;
-
-    const result: number[][] = [];
-    const samplesPerSegment = 4;
-
-    // Process Bezier segments
-    for (let i = 0; i + 3 < points.length; i += 3) {
-      const p0 = points[i];
-      const p1 = points[i + 1];
-      const p2 = points[i + 2];
-      const p3 = points[i + 3];
-
-      for (let t = 0; t <= samplesPerSegment; t++) {
-        const u = t / samplesPerSegment;
-        const pt = evalCubicBezier(p0, p1, p2, p3, u);
-        if (result.length === 0 || this._distance(pt, result[result.length - 1]) > 0.01) {
-          result.push(pt);
-        }
+    this._fallbackOpacity = this.mobject.opacity;
+    for (const member of this.mobject.getFamily()) {
+      // VGroup.getLocalPoints() is an aggregate view of its descendants, not
+      // geometry owned by the container. Partializing that aggregate would
+      // change its length and violate VGroup's child-partition invariant.
+      if (
+        !(member instanceof VMobject) ||
+        member instanceof VGroup ||
+        member.getLocalPoints().length < 4
+      ) {
+        continue;
       }
+      const topology = member as unknown as { _transformSubpathLengths?: number[] };
+      this._parts.push({
+        mobject: member,
+        source: member.copy(),
+        color: member.color,
+        fillColor: member.fillColor ?? member.color,
+        fillOpacity: member.fillOpacity,
+        strokeColor: member.strokeColor ?? member.color,
+        strokeOpacity: member.opacity,
+        strokeWidth: member.strokeWidth,
+        transformSubpathLengths: topology._transformSubpathLengths
+          ? [...topology._transformSubpathLengths]
+          : undefined,
+      });
     }
 
-    return result.length > 1 ? result : points;
+    this._applyAtAlpha(0);
   }
 
-  protected _distance(a: number[], b: number[]): number {
-    const dx = a[0] - b[0];
-    const dy = a[1] - b[1];
-    const dz = (a[2] ?? 0) - (b[2] ?? 0);
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  /**
+   * Manim's bounds move from [-timeWidth, 0] to [1, 1 + timeWidth].
+   * Clamping creates a natural grow-in and shrink-out without opacity tricks.
+   */
+  protected _boundsAt(alpha: number): readonly [number, number] {
+    const clamped = clamp01(alpha);
+    const upper = clamped * (1 + this.timeWidth);
+    return [clamp01(upper - this.timeWidth), clamp01(upper)];
+  }
+
+  protected _applyPart(part: PassingFlashPart, lower: number, upper: number, _alpha: number): void {
+    part.mobject.pointwiseBecomePartial(part.source, lower, upper);
+    part.mobject.setFill(undefined, 0);
+    part.mobject.setStroke(
+      this._hasColorOverride ? this.flashColor : part.strokeColor,
+      this._hasStrokeWidthOverride ? this.flashStrokeWidth : part.strokeWidth,
+      part.strokeOpacity,
+    );
+  }
+
+  protected _applyAtAlpha(alpha: number): void {
+    if (this._parts.length === 0) {
+      // A non-vector object has no meaningful partial path. Keep the fallback
+      // deterministic and non-flashing while still honoring remover semantics.
+      this.mobject.setStrokeOpacity(this._fallbackOpacity * Math.sin(Math.PI * clamp01(alpha)));
+      return;
+    }
+
+    const [lower, upper] = this._boundsAt(alpha);
+    for (const part of this._parts) this._applyPart(part, lower, upper, alpha);
   }
 
   interpolate(alpha: number): void {
-    if (!this._flashGroup || this._pathPoints.length < 2) return;
+    this._applyAtAlpha(alpha);
+  }
 
-    // Clear previous flash
-    while (this._flashGroup.children.length > 0) {
-      const child = this._flashGroup.children[0];
-      this._flashGroup.remove(child);
-      if (child instanceof Line2) {
-        child.geometry.dispose();
-        (child.material as LineMaterial).dispose();
-      }
-    }
+  protected _restorePart(part: PassingFlashPart): void {
+    part.mobject.setPoints3D(part.source.getLocalPoints());
+    part.mobject.setTransformSubpathLengths(part.transformSubpathLengths);
+    part.mobject.setColor(part.color);
+    part.mobject.fillColor = part.fillColor;
+    part.mobject.strokeColor = part.strokeColor;
+    part.mobject.setFillOpacity(part.fillOpacity);
+    part.mobject.setStroke(part.strokeColor, part.strokeWidth, part.strokeOpacity);
+  }
 
-    // Calculate which portion of the path to highlight
-    const numPoints = this._pathPoints.length;
-    const flashStart = alpha - this.timeWidth / 2;
-    const flashEnd = alpha + this.timeWidth / 2;
-
-    // Get point indices for the flash segment
-    const startIdx = Math.max(0, Math.floor(flashStart * (numPoints - 1)));
-    const endIdx = Math.min(numPoints - 1, Math.ceil(flashEnd * (numPoints - 1)));
-
-    if (startIdx >= endIdx) return;
-
-    // Extract flash segment points
-    const flashPoints = this._pathPoints.slice(startIdx, endIdx + 1);
-    if (flashPoints.length < 2) return;
-
-    // Create flash line
-    const positions: number[] = [];
-    for (const pt of flashPoints) {
-      positions.push(pt[0], pt[1], (pt[2] ?? 0) + 0.01); // Slightly above original
-    }
-
-    const geometry = new LineGeometry();
-    geometry.setPositions(positions);
-
-    // Calculate opacity based on position - fade in at start, fade out at end
-    let opacity = 1;
-    if (alpha < this.timeWidth) {
-      opacity = alpha / this.timeWidth;
-    } else if (alpha > 1 - this.timeWidth) {
-      opacity = (1 - alpha) / this.timeWidth;
-    }
-
-    const material = new LineMaterial({
-      color: new THREE.Color(this.flashColor).getHex(),
-      linewidth: this.flashStrokeWidth * 0.01,
-      transparent: true,
-      opacity: opacity,
-      resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
-    });
-
-    const line = new Line2(geometry, material);
-    line.computeLineDistances();
-    this._flashGroup.add(line);
+  protected _restoreParts(): void {
+    for (const part of this._parts) this._restorePart(part);
   }
 
   override finish(): void {
-    // Remove flash group from scene
-    if (this._flashGroup && this._parentObject) {
-      this._parentObject.remove(this._flashGroup);
-
-      this._flashGroup.traverse((child) => {
-        if (child instanceof Line2) {
-          child.geometry.dispose();
-          (child.material as LineMaterial).dispose();
-        }
-      });
-
-      this._flashGroup = null;
-    }
-
+    this._applyAtAlpha(1);
     super.finish();
+  }
+
+  override reset(): void {
+    // Keep the live capture across the base reset.  The base class may restore
+    // the root from its structural snapshot; the flash's per-leaf capture is
+    // still the authoritative source for independent fill/stroke paint.
+    const parts = [...this._parts];
+    super.reset();
+    for (const part of parts) this._restorePart(part);
+    this._parts = [];
+    this.mobject.setStrokeOpacity(this._fallbackOpacity);
   }
 }
 
-/**
- * Create a ShowPassingFlash animation for a mobject.
- * Shows a highlighted flash traveling along the mobject's path.
- * @param mobject The mobject (preferably VMobject) to show flash on
- * @param options ShowPassingFlash options (color, timeWidth, strokeWidth)
- */
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
 export function showPassingFlash(
   mobject: Mobject,
   options?: ShowPassingFlashOptions,

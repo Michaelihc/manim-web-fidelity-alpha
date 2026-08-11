@@ -7,6 +7,13 @@ import * as THREE from 'three';
 import { Mobject, Vector3Tuple, RIGHT } from './Mobject';
 import { VMobject, Point } from './VMobject';
 
+export interface ArrangeOptions {
+  /** Whether to preserve the group's pre-arrange center. Default: true. */
+  center?: boolean;
+  /** Edge shared by arranged children, e.g. LEFT for a left-aligned column. */
+  alignedEdge?: Vector3Tuple;
+}
+
 /**
  * VGroup is a specialized group for VMobjects.
  * Operations apply to all children, and paths can be combined.
@@ -203,9 +210,7 @@ export class VGroup extends VMobject {
   override setFillOpacity(opacity: number): this {
     super.setFillOpacity(opacity);
     for (const child of this.children) {
-      if (child instanceof VMobject) {
-        child.setFillOpacity(opacity);
-      }
+      child.setFillOpacity(opacity);
     }
     return this;
   }
@@ -215,16 +220,11 @@ export class VGroup extends VMobject {
    * @param color - CSS color string
    * @returns this for chaining
    */
-  setFill(color?: string, opacity?: number): this {
+  override setFill(color?: string, opacity?: number): this {
+    if (color !== undefined) this.fillColor = color;
+    if (opacity !== undefined) Mobject.prototype.setFillOpacity.call(this, opacity);
     for (const child of this.children) {
-      if (child instanceof VMobject) {
-        if (color !== undefined) {
-          child.setColor(color);
-        }
-        if (opacity !== undefined) {
-          child.setFillOpacity(opacity);
-        }
-      }
+      child.setFill(color, opacity);
     }
     return this;
   }
@@ -236,19 +236,12 @@ export class VGroup extends VMobject {
    * @param opacity - Stroke opacity (0-1)
    * @returns this for chaining
    */
-  setStroke(color?: string, width?: number, opacity?: number): this {
+  override setStroke(color?: string, width?: number, opacity?: number): this {
+    if (color !== undefined) this.strokeColor = color;
+    if (width !== undefined) Mobject.prototype.setStrokeWidth.call(this, width);
+    if (opacity !== undefined) Mobject.prototype.setStrokeOpacity.call(this, opacity);
     for (const child of this.children) {
-      if (child instanceof VMobject) {
-        if (color !== undefined) {
-          child.setColor(color);
-        }
-        if (width !== undefined) {
-          child.setStrokeWidth(width);
-        }
-        if (opacity !== undefined) {
-          child.setStrokeOpacity(opacity);
-        }
-      }
+      child.setStroke(color, width, opacity);
     }
     return this;
   }
@@ -257,11 +250,24 @@ export class VGroup extends VMobject {
    * Arrange children in a row or column with specified spacing.
    * @param direction - Direction to arrange (e.g., RIGHT for row, DOWN for column)
    * @param buff - Buffer/spacing between children, default 0.25
-   * @param center - Whether to center the arrangement at the group's position, default true
+   * @param centerOrOptions - Legacy center flag, or options including alignedEdge
+   * @param alignedEdge - Optional aligned edge for the legacy positional form
    * @returns this for chaining
    */
-  arrange(direction: Vector3Tuple = RIGHT, buff: number = 0.25, center: boolean = true): this {
+  arrange(
+    direction: Vector3Tuple = RIGHT,
+    buff: number = 0.25,
+    centerOrOptions: boolean | ArrangeOptions = true,
+    alignedEdge?: Vector3Tuple,
+  ): this {
     if (this.children.length === 0) return this;
+
+    const center =
+      typeof centerOrOptions === 'boolean' ? centerOrOptions : (centerOrOptions.center ?? true);
+    const resolvedAlignedEdge =
+      typeof centerOrOptions === 'boolean'
+        ? alignedEdge
+        : (centerOrOptions.alignedEdge ?? alignedEdge);
 
     // Store original center if we want to recenter later
     const originalCenter = center ? this.getCenter() : null;
@@ -271,7 +277,7 @@ export class VGroup extends VMobject {
 
     for (let i = 1; i < this.children.length; i++) {
       const child = this.children[i];
-      child.nextTo(prevChild, direction, buff);
+      child.nextTo(prevChild, direction, buff, resolvedAlignedEdge);
       prevChild = child;
     }
 

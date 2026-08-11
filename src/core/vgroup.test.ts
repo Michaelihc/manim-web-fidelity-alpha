@@ -488,7 +488,8 @@ describe('VGroup - extended coverage', () => {
     const a = new VMobject();
     const vg = new VGroup(a);
     vg.setFill('#abcdef');
-    expect(a.color).toBe('#abcdef');
+    expect(a.fillColor).toBe('#abcdef');
+    expect(a.strokeColor).toBe('#ffffff');
   });
 
   it('setFill with only opacity', () => {

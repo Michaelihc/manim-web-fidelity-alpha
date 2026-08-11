@@ -20,6 +20,50 @@ describe('Arrow defaults', () => {
     const da = new DoubleArrow({ start: [0, 0, 0], end: [2, 0, 0] });
     expect(da.getLength()).toBeGreaterThan(0);
   });
+
+  it('insets both endpoints by buff', () => {
+    const arrow = new Arrow({
+      start: [0, 0, 0],
+      end: [4, 0, 0],
+      buff: 0.5,
+    });
+    expect(arrow.getStart()).toEqual([0.5, 0, 0]);
+    expect(arrow.getEnd()).toEqual([3.5, 0, 0]);
+    expect(arrow.getLength()).toBeCloseTo(3, 8);
+  });
+
+  it('caps tip length on short arrows', () => {
+    const arrow = new Arrow({
+      start: [0, 0, 0],
+      end: [0.4, 0, 0],
+      tipLength: 0.3,
+      maxTipLengthToLengthRatio: 0.25,
+    });
+    expect(arrow.getTipLength()).toBeCloseTo(0.1, 8);
+  });
+
+  it('applies buff and tip-ratio options to DoubleArrow', () => {
+    const arrow = new DoubleArrow({
+      start: [0, 0, 0],
+      end: [4, 0, 0],
+      buff: 0.5,
+      tipLength: 1,
+      maxTipLengthToLengthRatio: 0.2,
+    });
+    expect(arrow.getStart()).toEqual([0.5, 0, 0]);
+    expect(arrow.getEnd()).toEqual([3.5, 0, 0]);
+    expect(arrow.getLength()).toBeCloseTo(3, 8);
+    expect(arrow.getTipLength()).toBeCloseTo(0.6, 8);
+  });
+
+  it('rejects non-finite buff and tip ratios', () => {
+    expect(() => new Arrow({ buff: Number.NaN })).toThrow(RangeError);
+    expect(() => new Arrow({ maxTipLengthToLengthRatio: Number.POSITIVE_INFINITY })).toThrow(
+      RangeError,
+    );
+    expect(() => new DoubleArrow({ buff: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+    expect(() => new DoubleArrow({ maxTipLengthToLengthRatio: Number.NaN })).toThrow(RangeError);
+  });
 });
 
 // ── reconstructTip ──────────────────────────────────────────────────────────

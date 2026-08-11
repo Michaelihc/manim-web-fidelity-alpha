@@ -8,17 +8,36 @@
  */
 
 import { VMobject } from '../../core/VMobject';
-import { Animation, AnimationOptions } from '../Animation';
+import { VGroup } from '../../core/VGroup';
+import type { Mobject } from '../../core/Mobject';
+import { Animation, AnimationOptions, type AnimationScene } from '../Animation';
 import { hungarian, hungarianFromSimilarity } from '../../utils/hungarian';
-import { lerp, lerpPoint } from '../../utils/math';
-import { alignCompoundPathsForTransform } from '../../core/VMobjectTransformAlignment';
+import { lerpPoint } from '../../utils/math';
+import { Transform } from './Transform';
+import { shapeSimilarity, centerDistance } from './TransformMatchingShared';
 import {
-  MatchedPart,
-  FadingPart,
-  getBoundingBox,
-  shapeSimilarity,
-  centerDistance,
-} from './TransformMatchingShared';
+  applyPaintOpacityFactor,
+  capturePaintOpacity,
+  interpolatePaintOpacity,
+  restorePaintOpacity,
+  scaleCurrentPaintOpacity,
+  type PaintOpacitySnapshot,
+} from './PaintOpacity';
+
+interface PaintMatchedPart {
+  source: VMobject;
+  target: VMobject;
+  startPoints: number[][];
+  targetPoints: number[][];
+  alignedSubpathLengths?: number[];
+  startPaint: PaintOpacitySnapshot;
+  targetPaint: PaintOpacitySnapshot;
+}
+
+interface PaintFadingPart {
+  mobject: VMobject;
+  paint: PaintOpacitySnapshot;
+}
 
 // ============================================================================
 // TransformMatchingShapes
@@ -58,13 +77,19 @@ export class TransformMatchingShapes extends Animation {
   readonly fadeRatio: number;
 
   /** Matched parts that will transform */
-  private _matchedParts: MatchedPart[] = [];
+  private _matchedParts: PaintMatchedPart[] = [];
 
   /** Source parts that will fade out (no match in target) */
-  private _fadeOutParts: FadingPart[] = [];
+  private _fadeOutParts: PaintFadingPart[] = [];
 
   /** Target parts that will fade in (no match in source) */
-  private _fadeInParts: FadingPart[] = [];
+  private _fadeInParts: PaintFadingPart[] = [];
+
+  /** Parents of temporary unmatched-target copies. */
+  private _fadeInParents = new Map<VMobject, Mobject>();
+
+  /** Exact source family paint values for backward seeking/reset. */
+  private _sourcePaint: PaintOpacitySnapshot = [];
 
   constructor(source: VMobject, target: VMobject, options: TransformMatchingShapesOptions = {}) {
     super(source, options);
@@ -153,9 +178,7 @@ export class TransformMatchingShapes extends Animation {
         const vmob = sourceSubmobs[i];
         this._fadeOutParts.push({
           mobject: vmob,
-          fadeIn: false,
-          startOpacity: vmob.opacity,
-          targetOpacity: 0,
+          paint: capturePaintOpacity(vmob),
         });
       }
     }
@@ -166,19 +189,19 @@ export class TransformMatchingShapes extends Animation {
         const vmob = targetSubmobs[i];
         // Add to scene as copy, starting invisible
         const copy = vmob.copy() as VMobject;
-        copy.opacity = 0;
+        const paint = capturePaintOpacity(copy);
+        applyPaintOpacityFactor(paint, 0);
 
-        // Add to parent of source mobject
-        const parent = this.mobject.parent;
-        if (parent) {
-          parent.add(copy);
-        }
+        // A detached/top-level source still needs a render owner during the
+        // animation. Attach copies to the source itself in that case; cleanup
+        // detaches them before swapping the scene root to the exact target.
+        const parent = this.mobject.parent ?? this.mobject;
+        parent.add(copy);
+        this._fadeInParents.set(copy, parent);
 
         this._fadeInParts.push({
           mobject: copy,
-          fadeIn: true,
-          startOpacity: 0,
-          targetOpacity: vmob.opacity,
+          paint,
         });
       }
     }
@@ -197,8 +220,8 @@ export class TransformMatchingShapes extends Animation {
       target,
       startPoints: srcCopy.getLocalPoints(),
       targetPoints: tgtCopy.getLocalPoints(),
-      startOpacity: source.opacity,
-      targetOpacity: target.opacity,
+      startPaint: capturePaintOpacity(source),
+      targetPaint: capturePaintOpacity(target),
     });
 
     // Set source to have aligned points
@@ -206,7 +229,12 @@ export class TransformMatchingShapes extends Animation {
   }
 
   override begin(): void {
+    this._detachFadeInCopies();
+    this._matchedParts = [];
+    this._fadeOutParts = [];
+    this._fadeInParts = [];
     super.begin();
+    this._sourcePaint = capturePaintOpacity(this.mobject);
     this._matchSubmobjects();
   }
 
@@ -219,21 +247,22 @@ export class TransformMatchingShapes extends Animation {
       }
       part.source.setPoints(points);
       part.source.setTransformSubpathLengths(part.alignedSubpathLengths);
-      part.source.opacity = lerp(part.startOpacity, part.targetOpacity, alpha);
+      interpolatePaintOpacity(part.startPaint, part.targetPaint, alpha);
     }
 
     // Handle fading parts with adjusted timing
     // Fade out happens in first half, fade in happens in second half
-    const fadeOutAlpha = Math.min(1, alpha / this.fadeRatio);
+    const fadeOutAlpha = this.fadeRatio === 0 ? 1 : Math.min(1, alpha / this.fadeRatio);
     const fadeInStart = 1 - this.fadeRatio;
-    const fadeInAlpha = Math.max(0, (alpha - fadeInStart) / this.fadeRatio);
+    const fadeInAlpha =
+      this.fadeRatio === 0 ? 1 : Math.max(0, (alpha - fadeInStart) / this.fadeRatio);
 
     for (const part of this._fadeOutParts) {
-      part.mobject.opacity = lerp(part.startOpacity, 0, Math.min(1, fadeOutAlpha));
+      applyPaintOpacityFactor(part.paint, 1 - Math.min(1, fadeOutAlpha));
     }
 
     for (const part of this._fadeInParts) {
-      part.mobject.opacity = lerp(0, part.targetOpacity, Math.min(1, fadeInAlpha));
+      applyPaintOpacityFactor(part.paint, Math.min(1, fadeInAlpha));
     }
   }
 
@@ -242,20 +271,45 @@ export class TransformMatchingShapes extends Animation {
     for (const part of this._matchedParts) {
       part.source.setPoints(part.targetPoints);
       part.source.setTransformSubpathLengths(undefined);
-      part.source.opacity = part.targetOpacity;
+      interpolatePaintOpacity(part.startPaint, part.targetPaint, 1);
       part.source.color = part.target.color;
     }
 
     // Finalize fading parts
     for (const part of this._fadeOutParts) {
-      part.mobject.opacity = 0;
+      applyPaintOpacityFactor(part.paint, 0);
     }
 
     for (const part of this._fadeInParts) {
-      part.mobject.opacity = part.targetOpacity;
+      restorePaintOpacity(part.paint);
     }
 
     super.finish();
+  }
+
+  override reset(): void {
+    this._detachFadeInCopies();
+    super.reset();
+    restorePaintOpacity(this._sourcePaint);
+    this._matchedParts = [];
+    this._fadeOutParts = [];
+    this._fadeInParts = [];
+  }
+
+  private _detachFadeInCopies(): void {
+    for (const [copy, parent] of this._fadeInParents) parent.remove(copy);
+    this._fadeInParents.clear();
+  }
+
+  override getAllMobjects(): readonly Mobject[] {
+    return [this.mobject, this.target];
+  }
+
+  override cleanUpFromScene(scene: AnimationScene): void {
+    super.cleanUpFromScene(scene);
+    this._detachFadeInCopies();
+    scene.remove(this.mobject);
+    scene.add(this.target);
   }
 }
 
@@ -286,23 +340,71 @@ export interface TransformMatchingTexOptions extends AnimationOptions {
   transformMismatches?: boolean;
 }
 
+interface LatexKeyedVMobject extends VMobject {
+  getLatex(): string;
+}
+
+interface MultipartLatexVMobject extends LatexKeyedVMobject {
+  getPartCount(): number;
+  getPart(index: number): VMobject;
+}
+
+interface ActiveMismatchTransform {
+  animation: Transform;
+  source: VMobject;
+}
+
+function getLatexString(vmobject: VMobject): string | undefined {
+  const candidate = vmobject as unknown as Partial<LatexKeyedVMobject>;
+  return typeof candidate.getLatex === 'function' ? candidate.getLatex() : undefined;
+}
+
 /**
- * Extract a key for TeX matching.
- * Tries to use the LaTeX string if available, otherwise uses a hash of the shape.
+ * Deep-copy a vector tree without invoking a self-rendering VGroup subclass
+ * constructor such as MathTex.copy(). The result is an animation snapshot, so
+ * retaining the generic VGroup/VMobject structure is sufficient.
+ */
+function copyVmobjectTree(vmobject: VMobject): VMobject {
+  if (!(vmobject instanceof VGroup)) return vmobject.copy() as VMobject;
+
+  const copy = new VGroup();
+  copy.position.copy(vmobject.position);
+  copy.rotation.copy(vmobject.rotation);
+  copy.scaleVector.copy(vmobject.scaleVector);
+  copy.color = vmobject.color;
+  copy.fillColor = vmobject.fillColor ?? vmobject.color;
+  copy.strokeColor = vmobject.strokeColor ?? vmobject.color;
+  copy.setStrokeOpacity(vmobject.opacity);
+  copy.setFillOpacity(vmobject.fillOpacity);
+  copy.setStrokeWidth(vmobject.strokeWidth);
+
+  for (const child of vmobject.children) {
+    if (child instanceof VMobject) copy.add(copyVmobjectTree(child));
+  }
+  return copy;
+}
+
+/**
+ * Snapshot `target` with geometry expressed in `parent`'s local frame.
+ * This preserves top-level MathTex position/scale when a semantic part is
+ * temporarily attached under the source tree.
+ */
+function copyVmobjectIntoParentFrame(target: VMobject, parent: Mobject | null): VMobject {
+  const copy = copyVmobjectTree(target);
+  const targetToParent = parent
+    ? parent._worldMatrix().clone().invert().multiply(target._worldMatrix())
+    : target._worldMatrix();
+  copy.normalizeTransform(targetToParent);
+  return copy;
+}
+
+/**
+ * Extract an exact semantic TeX key. Unannotated vector objects deliberately
+ * receive identity keys instead of shape-derived keys: equal dimensions and
+ * point counts do not imply equal TeX.
  */
 function defaultTexKey(vmobject: VMobject): string {
-  // Check if it's a MathTex or Tex with getLatex method
-  const maybeTexObj = vmobject as unknown as { getLatex?: () => string };
-  if (typeof maybeTexObj.getLatex === 'function') {
-    return maybeTexObj.getLatex();
-  }
-
-  // For VGroup children, try to identify by position and size
-  const box = getBoundingBox(vmobject);
-  const sizeKey = `${box.size[0].toFixed(2)}_${box.size[1].toFixed(2)}`;
-  const pointCount = vmobject.getLocalPoints().length;
-
-  return `shape_${sizeKey}_${pointCount}`;
+  return getLatexString(vmobject) ?? `unkeyed:${vmobject.id}`;
 }
 
 /**
@@ -334,17 +436,23 @@ export class TransformMatchingTex extends Animation {
   /** Whether to transform mismatches instead of fading */
   readonly transformMismatches: boolean;
 
-  /** Matched parts that will transform */
-  private _matchedParts: MatchedPart[] = [];
+  /** Canonical transforms for exact semantic-key matches. */
+  private _matchedTransforms: Transform[] = [];
 
   /** Source parts that will fade out (no match in target) */
-  private _fadeOutParts: FadingPart[] = [];
+  private _fadeOutParts: PaintFadingPart[] = [];
 
   /** Target parts that will fade in (no match in source) */
-  private _fadeInParts: FadingPart[] = [];
+  private _fadeInParts: PaintFadingPart[] = [];
 
-  /** Mismatched pairs that will transform (if transformMismatches is true) */
-  private _mismatchedPairs: MatchedPart[] = [];
+  /** Parent used to render and later detach each temporary fade-in copy. */
+  private _fadeInParents = new Map<VMobject, Mobject>();
+
+  /** Canonical transforms for mismatches, with the existing cross-fade envelope. */
+  private _mismatchedTransforms: ActiveMismatchTransform[] = [];
+
+  /** Exact source family paint values for backward seeking/reset. */
+  private _sourcePaint: PaintOpacitySnapshot = [];
 
   constructor(source: VMobject, target: VMobject, options: TransformMatchingTexOptions = {}) {
     super(source, options);
@@ -358,22 +466,39 @@ export class TransformMatchingTex extends Animation {
    * Get submobjects from a TeX mobject
    */
   private _getTexParts(vmobject: VMobject): VMobject[] {
-    // If the mobject has children (like a VGroup of TeX parts), use those
+    const multipart = vmobject as unknown as Partial<MultipartLatexVMobject>;
+    if (typeof multipart.getPartCount === 'function' && typeof multipart.getPart === 'function') {
+      const declaredParts: VMobject[] = [];
+      const partCount = multipart.getPartCount();
+      try {
+        for (let index = 0; index < partCount; index++) {
+          const part = multipart.getPart(index);
+          if (!(part instanceof VMobject)) {
+            throw new Error(`TeX part ${index} is not a VMobject.`);
+          }
+          declaredParts.push(part);
+        }
+      } catch {
+        // A single-string MathTex reports one logical part but intentionally
+        // rejects getPart(); in that case the root itself is the semantic part.
+        declaredParts.length = 0;
+      }
+      if (declaredParts.length > 0) return declaredParts;
+    }
+
+    // A semantic part owns its descendants. Do not flatten through glyph paths.
+    if (getLatexString(vmobject) !== undefined) return [vmobject];
+
+    // Generic wrappers may contain semantic MathTex/part nodes.
     const children = vmobject.children.filter((c) => c instanceof VMobject) as VMobject[];
     if (children.length > 0) {
-      // Recursively flatten nested groups
       const result: VMobject[] = [];
       for (const child of children) {
-        const childParts = this._getTexParts(child);
-        if (childParts.length > 0 && childParts[0] !== child) {
-          result.push(...childParts);
-        } else {
-          result.push(child);
-        }
+        result.push(...this._getTexParts(child));
       }
       return result;
     }
-    // Treat the mobject itself as a single part
+
     return [vmobject];
   }
 
@@ -474,9 +599,7 @@ export class TransformMatchingTex extends Animation {
           const vmob = unmatchedSources[si];
           this._fadeOutParts.push({
             mobject: vmob,
-            fadeIn: false,
-            startOpacity: vmob.opacity,
-            targetOpacity: 0,
+            paint: capturePaintOpacity(vmob),
           });
         }
       }
@@ -493,9 +616,7 @@ export class TransformMatchingTex extends Animation {
         const vmob = sourceParts[si];
         this._fadeOutParts.push({
           mobject: vmob,
-          fadeIn: false,
-          startOpacity: vmob.opacity,
-          targetOpacity: 0,
+          paint: capturePaintOpacity(vmob),
         });
       }
 
@@ -509,193 +630,126 @@ export class TransformMatchingTex extends Animation {
    * Add a matched pair
    */
   private _addMatchedPart(source: VMobject, target: VMobject): void {
-    const srcCopy = source.copy() as VMobject;
-    const tgtCopy = target.copy() as VMobject;
-    const srcLengths = source.getEffectiveSubpathLengths?.();
-    const tgtLengths = target.getEffectiveSubpathLengths?.();
-    const alignedCompound = alignCompoundPathsForTransform(
-      srcCopy.getLocalPoints(),
-      srcLengths,
-      tgtCopy.getLocalPoints(),
-      tgtLengths,
-      source.getSubpathOrientationSigns?.(srcLengths),
-      target.getSubpathOrientationSigns?.(tgtLengths),
-    );
-
-    if (alignedCompound) {
-      this._matchedParts.push({
-        source,
-        target,
-        startPoints: alignedCompound.srcAlignedPoints,
-        targetPoints: alignedCompound.tgtAlignedPoints,
-        startOpacity: source.opacity,
-        targetOpacity: target.opacity,
-        alignedSubpathLengths: alignedCompound.alignedSubpathLengths,
-      });
-
-      source.setPoints(alignedCompound.srcAlignedPoints);
-      source.setTransformSubpathLengths(alignedCompound.alignedSubpathLengths);
-    } else {
-      srcCopy.alignPoints(tgtCopy);
-
-      this._matchedParts.push({
-        source,
-        target,
-        startPoints: srcCopy.getLocalPoints(),
-        targetPoints: tgtCopy.getLocalPoints(),
-        startOpacity: source.opacity,
-        targetOpacity: target.opacity,
-        alignedSubpathLengths: undefined,
-      });
-
-      source.setPoints(srcCopy.getLocalPoints());
-      source.setTransformSubpathLengths(undefined);
-    }
+    const targetSnapshot = copyVmobjectIntoParentFrame(target, source.parent);
+    const transform = new Transform(source, targetSnapshot);
+    transform.begin();
+    this._matchedTransforms.push(transform);
   }
 
   /**
    * Add a mismatched pair for transformation
    */
   private _addMismatchedPair(source: VMobject, target: VMobject): void {
-    const srcCopy = source.copy() as VMobject;
-    const tgtCopy = target.copy() as VMobject;
-    const srcLengths = source.getEffectiveSubpathLengths?.();
-    const tgtLengths = target.getEffectiveSubpathLengths?.();
-    const alignedCompound = alignCompoundPathsForTransform(
-      srcCopy.getLocalPoints(),
-      srcLengths,
-      tgtCopy.getLocalPoints(),
-      tgtLengths,
-      source.getSubpathOrientationSigns?.(srcLengths),
-      target.getSubpathOrientationSigns?.(tgtLengths),
-    );
-
-    if (alignedCompound) {
-      this._mismatchedPairs.push({
-        source,
-        target,
-        startPoints: alignedCompound.srcAlignedPoints,
-        targetPoints: alignedCompound.tgtAlignedPoints,
-        startOpacity: source.opacity,
-        targetOpacity: target.opacity,
-        alignedSubpathLengths: alignedCompound.alignedSubpathLengths,
-      });
-
-      source.setPoints(alignedCompound.srcAlignedPoints);
-      source.setTransformSubpathLengths(alignedCompound.alignedSubpathLengths);
-    } else {
-      srcCopy.alignPoints(tgtCopy);
-
-      this._mismatchedPairs.push({
-        source,
-        target,
-        startPoints: srcCopy.getLocalPoints(),
-        targetPoints: tgtCopy.getLocalPoints(),
-        startOpacity: source.opacity,
-        targetOpacity: target.opacity,
-        alignedSubpathLengths: undefined,
-      });
-
-      source.setPoints(srcCopy.getLocalPoints());
-      source.setTransformSubpathLengths(undefined);
-    }
+    const targetSnapshot = copyVmobjectIntoParentFrame(target, source.parent);
+    const transform = new Transform(source, targetSnapshot);
+    transform.begin();
+    this._mismatchedTransforms.push({
+      animation: transform,
+      source,
+    });
   }
 
   /**
    * Add a fade-in part
    */
   private _addFadeInPart(vmob: VMobject): void {
-    const copy = vmob.copy() as VMobject;
-    copy.opacity = 0;
-
-    const parent = this.mobject.parent;
-    if (parent) {
-      parent.add(copy);
-    }
+    const parent = this.mobject.parent ?? this.mobject;
+    const copy = copyVmobjectIntoParentFrame(vmob, parent);
+    const paint = capturePaintOpacity(copy);
+    applyPaintOpacityFactor(paint, 0);
+    parent.add(copy);
+    this._fadeInParents.set(copy, parent);
 
     this._fadeInParts.push({
       mobject: copy,
-      fadeIn: true,
-      startOpacity: 0,
-      targetOpacity: vmob.opacity,
+      paint,
     });
   }
 
+  private _detachFadeInCopies(): void {
+    for (const [copy, parent] of this._fadeInParents) {
+      parent.remove(copy);
+    }
+    this._fadeInParents.clear();
+  }
+
   override begin(): void {
+    this._detachFadeInCopies();
+    this._matchedTransforms = [];
+    this._mismatchedTransforms = [];
+    this._fadeOutParts = [];
+    this._fadeInParts = [];
     super.begin();
+    this._sourcePaint = capturePaintOpacity(this.mobject);
     this._matchTexParts();
   }
 
   interpolate(alpha: number): void {
-    // Interpolate matched parts
-    for (const part of this._matchedParts) {
-      const points: number[][] = [];
-      for (let i = 0; i < part.startPoints.length; i++) {
-        points.push(lerpPoint(part.startPoints[i], part.targetPoints[i], alpha));
-      }
-      part.source.setPoints(points);
-      part.source.setTransformSubpathLengths(part.alignedSubpathLengths);
-      part.source.opacity = lerp(part.startOpacity, part.targetOpacity, alpha);
+    for (const transform of this._matchedTransforms) {
+      transform.interpolate(alpha);
     }
 
-    // Interpolate mismatched pairs with cross-fade
-    for (const part of this._mismatchedPairs) {
-      const points: number[][] = [];
-      for (let i = 0; i < part.startPoints.length; i++) {
-        points.push(lerpPoint(part.startPoints[i], part.targetPoints[i], alpha));
-      }
-      part.source.setPoints(points);
-      part.source.setTransformSubpathLengths(part.alignedSubpathLengths);
-
-      // Cross-fade effect: fade out then fade in
-      if (alpha < 0.5) {
-        part.source.opacity = lerp(part.startOpacity, 0, alpha * 2);
-      } else {
-        part.source.opacity = lerp(0, part.targetOpacity, (alpha - 0.5) * 2);
-      }
+    for (const part of this._mismatchedTransforms) {
+      part.animation.interpolate(alpha);
+      scaleCurrentPaintOpacity(part.source, Math.abs(2 * alpha - 1));
     }
 
     // Handle fading parts
-    const fadeOutAlpha = Math.min(1, alpha / this.fadeRatio);
+    const fadeOutAlpha = this.fadeRatio === 0 ? 1 : Math.min(1, alpha / this.fadeRatio);
     const fadeInStart = 1 - this.fadeRatio;
-    const fadeInAlpha = Math.max(0, (alpha - fadeInStart) / this.fadeRatio);
+    const fadeInAlpha =
+      this.fadeRatio === 0 ? 1 : Math.max(0, (alpha - fadeInStart) / this.fadeRatio);
 
     for (const part of this._fadeOutParts) {
-      part.mobject.opacity = lerp(part.startOpacity, 0, Math.min(1, fadeOutAlpha));
+      applyPaintOpacityFactor(part.paint, 1 - Math.min(1, fadeOutAlpha));
     }
 
     for (const part of this._fadeInParts) {
-      part.mobject.opacity = lerp(0, part.targetOpacity, Math.min(1, fadeInAlpha));
+      applyPaintOpacityFactor(part.paint, Math.min(1, fadeInAlpha));
     }
   }
 
   override finish(): void {
-    // Finalize matched parts
-    for (const part of this._matchedParts) {
-      part.source.setPoints(part.targetPoints);
-      part.source.setTransformSubpathLengths(undefined);
-      part.source.opacity = part.targetOpacity;
-      part.source.color = part.target.color;
+    for (const transform of this._matchedTransforms) {
+      transform.finish();
     }
 
-    // Finalize mismatched pairs
-    for (const part of this._mismatchedPairs) {
-      part.source.setPoints(part.targetPoints);
-      part.source.setTransformSubpathLengths(undefined);
-      part.source.opacity = part.targetOpacity;
-      part.source.color = part.target.color;
+    for (const part of this._mismatchedTransforms) {
+      part.animation.finish();
     }
 
-    // Finalize fading parts
     for (const part of this._fadeOutParts) {
-      part.mobject.opacity = 0;
+      applyPaintOpacityFactor(part.paint, 0);
     }
 
     for (const part of this._fadeInParts) {
-      part.mobject.opacity = part.targetOpacity;
+      restorePaintOpacity(part.paint);
     }
 
     super.finish();
+  }
+
+  override cleanUpFromScene(scene: AnimationScene): void {
+    super.cleanUpFromScene(scene);
+    this._detachFadeInCopies();
+    scene.remove(this.mobject);
+    scene.add(this.target);
+  }
+
+  override getAllMobjects(): readonly Mobject[] {
+    return [this.mobject, this.target];
+  }
+
+  override reset(): void {
+    for (const transform of this._matchedTransforms) transform.reset();
+    for (const part of this._mismatchedTransforms) part.animation.reset();
+    this._detachFadeInCopies();
+    super.reset();
+    restorePaintOpacity(this._sourcePaint);
+    this._matchedTransforms = [];
+    this._mismatchedTransforms = [];
+    this._fadeOutParts = [];
+    this._fadeInParts = [];
   }
 }
 
