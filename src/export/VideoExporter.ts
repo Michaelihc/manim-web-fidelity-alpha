@@ -74,6 +74,7 @@ export class VideoExporter {
   private _mediaRecorder: MediaRecorder | null = null;
   private _recordedChunks: Blob[] = [];
   private _isRecording: boolean = false;
+  private _recordedMimeType: string = 'video/webm';
 
   /**
    * Create a new VideoExporter.
@@ -171,6 +172,7 @@ export class VideoExporter {
       mimeType,
       videoBitsPerSecond: Math.floor(this._options.quality * 10_000_000),
     });
+    this._recordedMimeType = (this._mediaRecorder.mimeType || mimeType).split(';')[0];
 
     this._mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
@@ -195,15 +197,7 @@ export class VideoExporter {
       }
 
       this._mediaRecorder.onstop = () => {
-        let mimeType: string;
-        if (this._options.format === 'webm') {
-          mimeType = 'video/webm';
-        } else if (this._options.format === 'mov') {
-          mimeType = 'video/quicktime';
-        } else {
-          mimeType = 'video/mp4';
-        }
-        const blob = new Blob(this._recordedChunks, { type: mimeType });
+        const blob = new Blob(this._recordedChunks, { type: this._recordedMimeType });
         this._isRecording = false;
         resolve(blob);
       };
@@ -319,8 +313,12 @@ export class VideoExporter {
    */
   async exportAndDownload(filename?: string, duration?: number): Promise<void> {
     const blob = await this.exportTimeline(duration);
-    const extMap: Record<string, string> = { webm: '.webm', mp4: '.mp4', mov: '.mov' };
-    const ext = extMap[this._options.format] ?? '.webm';
+    const extMap: Record<string, string> = {
+      'video/webm': '.webm',
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+    };
+    const ext = extMap[blob.type.split(';')[0]] ?? '.webm';
     VideoExporter.download(blob, filename ?? `animation${ext}`);
   }
 
