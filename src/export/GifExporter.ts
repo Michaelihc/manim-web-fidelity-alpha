@@ -1,4 +1,5 @@
 import GIF from 'gif.js';
+import { validateCaptureOptions, validateQuality } from './validateOptions';
 
 /**
  * Duck-type interface for Scene, used to avoid circular imports.
@@ -38,6 +39,11 @@ export class GifExporter {
       repeat: options?.repeat ?? 0,
       onProgress: options?.onProgress ?? (() => {}),
     };
+    validateCaptureOptions(this._options);
+    validateQuality(this._options.quality, 1, 30);
+    if (!Number.isSafeInteger(this._options.workers) || this._options.workers <= 0) {
+      throw new RangeError('GIF workers must be a positive safe integer');
+    }
   }
 
   /**

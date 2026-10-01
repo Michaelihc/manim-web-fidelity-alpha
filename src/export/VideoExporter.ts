@@ -1,5 +1,6 @@
 import type { AudioManager } from '../core/AudioManager';
 import { logger } from '../utils/logger';
+import { validateCaptureOptions, validateQuality } from './validateOptions';
 
 /**
  * Duck-type interface for Scene, used to avoid circular imports.
@@ -93,6 +94,8 @@ export class VideoExporter {
       includeAudio: options?.includeAudio ?? true,
       audioManager: options?.audioManager ?? null,
     };
+    validateCaptureOptions(this._options);
+    validateQuality(this._options.quality, 0, 1);
   }
 
   /**
